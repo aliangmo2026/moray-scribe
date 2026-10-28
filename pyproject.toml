@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "moray-scribe"
+description = "God-view reverse documentation and architecture diagram engine for legacy code."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dynamic = ["version"]
+keywords = ["legacy-code", "static-analysis", "architecture", "mermaid", "ollama", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Software Development :: Code Generators",
+    "Environment :: Console",
+    "Typing :: Typed",
+]
+dependencies = [
+    "libcst>=1.4",
+    "networkx>=3.3",
+    # networkx.pagerank dispatches to a SciPy/NumPy power iteration.
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "typer>=0.12",
+    "rich>=13",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "ollama>=0.3",
+    # Imported directly by describer.client for exception classification.
+    "httpx>=0.27",
+    "jinja2>=3.1",
+    "tiktoken>=0.7",
+    "loguru>=0.7",
+    "mcp>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/moray/moray-scribe"
+Documentation = "https://github.com/moray/moray-scribe#readme"
+Repository = "https://github.com/moray/moray-scribe"
+Issues = "https://github.com/moray/moray-scribe/issues"
+Changelog = "https://github.com/moray/moray-scribe/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+moray-scribe = "moray_scribe.cli:app"
+
+[tool.hatch.version]
+path = "src/moray_scribe/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/moray_scribe"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["moray_scribe"]
+
+[tool.ruff.lint.per-file-ignores]
+# libcst dispatches on visit_ClassDef/leave_Module-style CamelCase method names.
+"src/moray_scribe/scanner/extractor.py" = ["N802"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/moray_scribe/schema", "src/moray_scribe/describer"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["libcst.*", "networkx.*", "ollama.*", "tiktoken.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The FastMCP -> MCPServer version shim leaves `app` untyped, so the @app.tool()
+# decorator can't be proven to preserve signatures. The tool bodies are fully
+# typed; only the decorator application itself is exempted.
+module = ["moray_scribe.mcp.*"]
+disable_error_code = ["untyped-decorator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
