@@ -1,5 +1,10 @@
 # moray-scribe
 
+![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
+![Tests: 241 passed](https://img.shields.io/badge/tests-241%20passed-green.svg)
+![Status: Beta](https://img.shields.io/badge/status-Beta-orange.svg)
+
 > 🏗️ **接手的遗留代码看不懂？让它自己画出架构图。**
 
 几万行的 Python 老项目，没有文档、原作者已离职，市面的 AI 助手只能"打开一个文件问一句"，
@@ -10,6 +15,13 @@ moray-scribe 用静态分析先把整个项目的符号与调用拓扑提出来�
 
 它不是"逐文件解释器"：见[真实项目验证报告](docs/realworld-report.md)——在 `psf/requests`
 （6394 行）上跑通扫描、建图、枢纽识别与 Mermaid 渲染的完整链路。
+
+## 为什么做这个？
+
+> 市面上的 AI 编程助手（Cursor/Copilot）只能"打开一个文件问一句"，因为大模型上下文装不下
+> 几万行代码。一旦让 AI 直接看全项目画架构，它就会**疯狂幻觉**。
+>
+> 我们的解法：**静态分析提取物理拓扑，大模型只做业务推理**。
 
 ---
 
@@ -61,6 +73,36 @@ moray-scribe graph ./legacy/ --max-nodes 200
 moray-scribe doc ./legacy/ --out ./arch-doc/
 ```
 
+下面是用 moray-scribe 分析 `psf/requests`（6394 行）后生成的架构图实景（GitHub 原生渲染，
+可直接复制体验）：
+
+```mermaid
+flowchart TD
+    subgraph Core["核心层 (Core)"]
+        Session["Session\n(核心请求上下文)"]
+        API["api.request\n(统一入口)"]
+        Models["Request / Response"]
+    end
+    subgraph Network["网络层 (Adapters)"]
+        HTTPAdapter["HTTPAdapter"]
+        SSL["SSLContext"]
+    end
+    subgraph Utils["工具层 (Utils)"]
+        Auth["AuthBase / HTTPBasicAuth"]
+        Exceptions["RequestException"]
+    end
+
+    API --> Session
+    Session --> HTTPAdapter
+    Session --> Models
+    HTTPAdapter --> SSL
+    Session --> Auth
+    Session -.->|抛出| Exceptions
+```
+
+*上图：使用 moray-scribe 分析 `psf/requests`（6394 行）后，引擎自动生成的架构图
+（由大模型基于符号图推理）。*
+
 ## 接入 Cursor（MCP）
 
 三步挂进 Cursor / Claude Desktop：
@@ -83,11 +125,14 @@ moray-scribe doc ./legacy/ --out ./arch-doc/
 | `scribe_read_artifact` | 按章节/大小分块读回产物（保护上下文） |
 | `scribe_list_symbols` | 分页查询符号图 |
 
-## 设计哲学
+<details>
+<summary>👉 点击展开：AI 推理与引擎统计的分区哲学</summary>
 
 - **物理分析精确 + 语义推理补缺**：拓扑边宁缺毋滥，缺口显式标注，不让模型瞎编。
 - **AI / 引擎分区**：模型推断的和引擎计算的在文档里分区呈现，读者知道该信哪部分。
 - **可复现**：同一输入两次运行，`ARCHITECTURE.md` 与 `.mmd` 字节一致（无时间戳、无随机）。
+
+</details>
 
 ## 已知限制（v0.1.0）
 
@@ -112,6 +157,13 @@ moray-scribe doc ./legacy/ --out ./arch-doc/
 - [真实项目验证报告](docs/realworld-report.md)
 - [架构设计说明](docs/architecture.md)
 - [CHANGELOG](CHANGELOG.md)
+
+## 🗺️ Roadmap
+
+- [x] v0.1.0: 四模式管线、MCP 接入、核心防幻觉闭环
+- [ ] v0.1.1: 补充真实自我剖析 `examples`，接首批 Issue
+- [ ] v0.2.0: 两阶段生成、R5-2 粒度检测 override、自动评分
+- [ ] v0.5.0: 支持 JS/TS (tree-sitter)
 
 ## License
 
