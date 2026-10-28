@@ -79,8 +79,8 @@ moray-scribe doc ./legacy/ --out ./arch-doc/
 ```mermaid
 flowchart TD
     subgraph Core["核心层 (Core)"]
-        Session["Session\n(核心请求上下文)"]
-        API["api.request\n(统一入口)"]
+        Session["Session<br/>(核心请求上下文)"]
+        API["api.request<br/>(统一入口)"]
         Models["Request / Response"]
     end
     subgraph Network["网络层 (Adapters)"]
@@ -88,7 +88,7 @@ flowchart TD
         SSL["SSLContext"]
     end
     subgraph Utils["工具层 (Utils)"]
-        Auth["AuthBase / HTTPBasicAuth"]
+        Auth["AuthBase<br/>HTTPBasicAuth"]
         Exceptions["RequestException"]
     end
 
@@ -98,6 +98,14 @@ flowchart TD
     HTTPAdapter --> SSL
     Session --> Auth
     Session -.->|抛出| Exceptions
+
+    classDef core fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef net fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    classDef util fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000
+
+    class Session,API,Models core
+    class HTTPAdapter,SSL net
+    class Auth,Exceptions util
 ```
 
 *上图：使用 moray-scribe 分析 `psf/requests`（6394 行）后，引擎自动生成的架构图
