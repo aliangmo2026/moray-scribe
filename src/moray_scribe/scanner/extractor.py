@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,11 +13,24 @@ from libcst.metadata import CodeRange, MetadataWrapper, PositionProvider
 
 from moray_scribe.exceptions import ScanError, ScribeError
 from moray_scribe.schema import (
+    AttrBinding,
     CallRef,
+    DynamicImportRef,
     ImportRef,
     RawSymbol,
     RawSymbolBundle,
     SymbolKind,
+    UrlPatternRef,
+)
+
+from .domains import (
+    URLCONF_NAMES as _URLCONF_NAMES,
+)
+from .domains import (
+    is_orm_base_text,
+    is_orm_column_call,
+    parse_route_decorator,
+    parse_urlconf_call,
 )
 
 
@@ -46,6 +60,33 @@ def _flatten_callee(expr: cst.BaseExpression) -> str | None:
     if isinstance(expr, cst.Subscript):
         base = _flatten_callee(expr.value)
         return None if base is None else f"{base}[]"
+    return None
+
+
+def _string_literal(node: cst.BaseExpression) -> str | None:
+    """Return the decoded value of a plain string-literal expression, else None.
+
+    Implicit concatenations (``"a" "b"``) are ConcatenatedString and rejected:
+    they are still compile-time constants, but one node type per case keeps the
+    scanner conservative and simple.
+    """
+    if not isinstance(node, cst.SimpleString):
+        return None
+    try:
+        value = ast.literal_eval(node.value)
+    except (ValueError, SyntaxError):
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _self_attr_name(target: cst.BaseExpression) -> str | None:
+    """Attribute name for a ``self.<attr>`` target expression, else None."""
+    if (
+        isinstance(target, cst.Attribute)
+        and isinstance(target.value, cst.Name)
+        and target.value.value == "self"
+    ):
+        return target.attr.value
     return None
 
 
@@ -101,11 +142,16 @@ class _SymbolVisitor(cst.CSTVisitor):
         self._symbols: list[RawSymbol] = []
         self._imports: list[ImportRef] = []
         self._calls: list[CallRef] = []
+        self._attr_bindings: list[AttrBinding] = []
+        self._dynamic_imports: list[DynamicImportRef] = []
         # R-2: the scanner never rewrites callees with this table; it documents
         # the local binding environment and is reconstructible from ``imports``.
         self._aliases: dict[str, tuple[str, str | None]] = {}
         self._suppress_depth = 0
         self._await_calls: set[int] = set()
+        # Class qualnames whose body instantiates ORM columns/tables (domains.py).
+        self._orm_classes: set[str] = set()
+        self._url_patterns: list[UrlPatternRef] = []
 
     # -- helpers ------------------------------------------------------------
 
@@ -128,6 +174,13 @@ class _SymbolVisitor(cst.CSTVisitor):
                 return ".".join(scope.names)
         # Module-level call; the grapher hangs these on a module node.
         return self._module
+
+    def _enclosing_class_qualname(self) -> str | None:
+        """Qualname of the nearest enclosing class, or None at module level."""
+        for scope in reversed(self._scopes):
+            if scope.kind == "class":
+                return ".".join(scope.names)
+        return None
 
     def _render_param(self, param: cst.Param) -> str:
         if param.annotation is None:
@@ -177,6 +230,10 @@ class _SymbolVisitor(cst.CSTVisitor):
                 is_public=not node.name.value.startswith("_"),
             )
         )
+        # Django/Flask-SQLAlchemy style: an ORM base class proves the mapping
+        # without needing a Column call in the body.
+        if any(is_orm_base_text(self._code(base.value)) for base in node.bases):
+            self._orm_classes.add(".".join(chain))
         self._scopes.append(_Scope(kind="class", names=chain))
 
     def leave_ClassDef(self, node: cst.ClassDef) -> None:
@@ -212,6 +269,7 @@ class _SymbolVisitor(cst.CSTVisitor):
                 is_async=node.asynchronous is not None,
                 is_public=not name.startswith("_"),
                 parent_id=self._parent_qualname(),
+                route=parse_route_decorator(decorators),
             )
         )
         self._scopes.append(
@@ -268,6 +326,149 @@ class _SymbolVisitor(cst.CSTVisitor):
                 lineno=position.start.line,
                 col_offset=position.start.column,
                 is_await=id(node) in self._await_calls,
+            )
+        )
+        self._maybe_record_dynamic_call(callee, node, position.start.line)
+        self._maybe_record_url_pattern(callee, node, position.start.line)
+
+    def _maybe_record_url_pattern(
+        self, callee: str, node: cst.Call, lineno: int
+    ) -> None:
+        """Record a Django urlconf ``path("...", view)`` entry."""
+        # Fast reject before rendering argument source: this runs for every call
+        # in a repository (87k+ on django) and rendering args is expensive.
+        last = callee.rsplit(".", 1)[-1]
+        if last not in _URLCONF_NAMES:
+            return
+        args_text = ", ".join(self._code(arg.value) for arg in node.args)
+        parsed = parse_urlconf_call(callee, args_text)
+        if parsed is None:
+            return
+        path, view = parsed
+        if view.split(".")[-1] == "include":
+            return
+        self._url_patterns.append(
+            UrlPatternRef(
+                # Root urlconf entries are written as path("") — normalize to "/".
+                path=path or "/",
+                target=view,
+                caller_qualname=self._caller_qualname(),
+                lineno=lineno,
+            )
+        )
+
+    def _maybe_record_dynamic_call(
+        self, callee: str, node: cst.Call, lineno: int
+    ) -> None:
+        """Record ``setattr(self, "x", ...)`` and literal dynamic imports.
+
+        Both shapes are recorded on top of the plain CallRef: the assignment
+        form feeds the grapher's attribute-type map, the import form wires
+        ``importlib.import_module("...")`` into the module graph.
+        """
+        args = node.args
+        if callee == "setattr" and len(args) >= 3:
+            if (
+                isinstance(args[0].value, cst.Name)
+                and args[0].value.value == "self"
+                and self._enclosing_class_qualname() is not None
+            ):
+                attr = _string_literal(args[1].value)
+                if attr is not None:
+                    self._attr_bindings.append(
+                        AttrBinding(
+                            attr=attr,
+                            value=self._code(args[2].value),
+                            owner_qualname=self._enclosing_class_qualname() or "",
+                            caller_qualname=self._caller_qualname(),
+                            lineno=lineno,
+                        )
+                    )
+            return
+        target_module: str | None = None
+        if callee == "importlib.import_module" or callee == "__import__":
+            if args:
+                target_module = _string_literal(args[0].value)
+        else:
+            # `from importlib import import_module [as alias]`: any local name
+            # bound to importlib.import_module counts, the plain name included.
+            entry = self._aliases.get(callee.split(".", 1)[0])
+            if entry == ("importlib", "import_module") and args:
+                target_module = _string_literal(args[0].value)
+        if target_module:
+            self._dynamic_imports.append(
+                DynamicImportRef(
+                    module=target_module,
+                    caller_qualname=self._caller_qualname(),
+                    lineno=lineno,
+                )
+            )
+
+    # -- self-attribute assignments -----------------------------------------
+
+    def visit_Assign(self, node: cst.Assign) -> None:
+        self._record_attr_binding(
+            [target.target for target in node.targets],
+            node.value,
+        )
+        self._record_orm_signal(
+            [target.target for target in node.targets],
+            node.value,
+        )
+
+    def visit_AnnAssign(self, node: cst.AnnAssign) -> None:
+        if node.value is not None:
+            self._record_attr_binding([node.target], node.value)
+            self._record_orm_signal([node.target], node.value)
+
+    def _record_orm_signal(
+        self,
+        targets: list[cst.BaseExpression],
+        value: cst.BaseExpression,
+    ) -> None:
+        """Mark the enclosing class as an ORM model from its body statements.
+
+        Only *direct* class-body assignments count (the scope stack's innermost
+        frame must be the class): ``__tablename__ = ...`` or a value that calls
+        ``Column``/``mapped_column``/``relationship``/``Field``. Method-local
+        assignments never trigger this.
+        """
+        if not self._scopes or self._scopes[-1].kind != "class":
+            return
+        owner = self._enclosing_class_qualname()
+        if owner is None:  # pragma: no cover - innermost frame is a class
+            return
+        for target in targets:
+            if isinstance(target, cst.Name) and target.value == "__tablename__":
+                self._orm_classes.add(owner)
+                return
+        if isinstance(value, cst.Call):
+            chain = _flatten_callee(value.func)
+            if chain is not None and is_orm_column_call(chain):
+                self._orm_classes.add(owner)
+
+    def _record_attr_binding(
+        self,
+        targets: list[cst.BaseExpression],
+        value: cst.BaseExpression,
+    ) -> None:
+        """Record ``self.<attr> = <expr>`` sites for the grapher's type map."""
+        owner = self._enclosing_class_qualname()
+        if owner is None:
+            return  # `self` only binds inside a class scope.
+        attr = next(
+            (name for name in (_self_attr_name(t) for t in targets) if name is not None),
+            None,
+        )
+        if attr is None:
+            return
+        self._attr_bindings.append(
+            AttrBinding(
+                attr=attr,
+                value=self._code(value),
+                owner_qualname=owner,
+                caller_qualname=self._caller_qualname(),
+                lineno=self._position(value).start.line,
             )
         )
 
@@ -331,6 +532,22 @@ class _SymbolVisitor(cst.CSTVisitor):
     def calls(self) -> list[CallRef]:
         return self._calls
 
+    @property
+    def attr_bindings(self) -> list[AttrBinding]:
+        return self._attr_bindings
+
+    @property
+    def dynamic_imports(self) -> list[DynamicImportRef]:
+        return self._dynamic_imports
+
+    @property
+    def orm_classes(self) -> set[str]:
+        return self._orm_classes
+
+    @property
+    def url_patterns(self) -> list[UrlPatternRef]:
+        return self._url_patterns
+
 
 def _extract_source(
     source: str,
@@ -354,12 +571,20 @@ def _extract_source(
     deduped: dict[str, RawSymbol] = {}
     for symbol in visitor.symbols:
         deduped[symbol.id] = symbol
+    # Domain post-pass: classes whose body proved ORM mapping get a tag the
+    # grapher, renderer and web viewer all key off.
+    for symbol in deduped.values():
+        if symbol.kind is SymbolKind.CLASS and symbol.id in visitor.orm_classes:
+            symbol.tags = [*symbol.tags, "orm_model"]
     return RawSymbolBundle(
         module=module,
         file=file,
         symbols=list(deduped.values()),
         imports=visitor.imports,
         calls=visitor.calls,
+        attr_bindings=visitor.attr_bindings,
+        dynamic_imports=visitor.dynamic_imports,
+        url_patterns=visitor.url_patterns,
         parse_errors=[],
         source_hash=hashlib.sha256(source.encode("utf-8")).hexdigest(),
     )

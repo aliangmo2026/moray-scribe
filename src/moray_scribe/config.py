@@ -47,6 +47,36 @@ class Settings(BaseSettings):
             "(e.g. 8192+) or the draft can be truncated."
         ),
     )
+    inference_enabled: bool = Field(
+        False,
+        description=(
+            "Run the LLM dynamic-inference stage during `doc` (dangling-call "
+            "resolution). Off by default so deterministic runs stay deterministic; "
+            "enable with --infer or MORAY_SCRIBE_INFERENCE_ENABLED=true."
+        ),
+    )
+    model_inferencer: str = Field(
+        "qwen2.5:7b",
+        description="Ollama model used for dangling-call inference (small and fast is best).",
+    )
+    inference_batch_size: int = Field(
+        8,
+        ge=1,
+        le=64,
+        description="Dangling call sites per inference request.",
+    )
+    inference_max_calls: int = Field(
+        60,
+        ge=0,
+        le=10000,
+        description="Cap on dangling calls sent to the model per run (top PageRank first).",
+    )
+    inference_concurrency: int = Field(
+        4,
+        ge=1,
+        le=16,
+        description="Max concurrent inference requests to Ollama.",
+    )
 
 
 def load_settings(path: Path | None = None) -> Settings:

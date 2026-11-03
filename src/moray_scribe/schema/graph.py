@@ -9,7 +9,7 @@ from pydantic import Field, model_validator
 
 from ..exceptions import GraphError, SchemaError
 from .base import StrictModel
-from .symbols import SymbolKind
+from .symbols import RouteInfo, SymbolKind
 
 
 class EdgeKind(str, Enum):
@@ -22,6 +22,7 @@ class EdgeKind(str, Enum):
     INSTANTIATES = "instantiates"
     USES = "uses"
     REFERENCES = "references"
+    DATA_FLOW = "data_flow"
 
 
 class SymbolNode(StrictModel):
@@ -66,6 +67,10 @@ class SymbolNode(StrictModel):
         description="Whether the node is a package __init__.py facade.",
     )
     tags: list[str] = Field(default_factory=list, description="Free-form tags.")
+    route: RouteInfo | None = Field(
+        default=None,
+        description="HTTP route bound to this symbol by a recognized decorator, if any.",
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -97,6 +102,18 @@ class SymbolEdge(StrictModel):
     resolved: bool = Field(
         default=True,
         description="False when the target was matched heuristically.",
+    )
+    inferred: bool = Field(
+        default=False,
+        description="True when this edge was added by LLM dynamic inference, not static analysis.",
+    )
+    confidence: str | None = Field(
+        default=None,
+        description="Inference confidence (high/medium/low); None for static edges.",
+    )
+    reason: str = Field(
+        default="",
+        description="The inference rationale for an LLM-inferred edge; empty for static edges.",
     )
 
 

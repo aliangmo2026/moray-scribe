@@ -89,12 +89,26 @@ def test_call_via_import_alias() -> None:
     assert ("user.make", "core.Engine") in _edge_pairs(graph, EdgeKind.INSTANTIATES)
 
 
-def test_call_self_skipped(sample_graph: SymbolGraph) -> None:
+def test_call_self_resolved_via_binding(sample_graph: SymbolGraph) -> None:
+    """v0.2 dynamic heuristics: self-chains resolve when evidence is static.
+
+    ``Service.__init__`` assigns ``self.engine = Engine("service")`` so
+    ``self.engine.run()`` resolves to ``core.Engine.run``; ``self.start()``
+    inside ``Engine.run`` resolves against the caller's own class.
+    """
     calls = _edge_pairs(sample_graph, EdgeKind.CALLS)
-    assert not any(target == "core.Engine.run" for _, target in calls)
+    assert ("service.Service.run", "core.Engine.run") in calls
+    assert ("core.Engine.run", "core.Engine.start") in calls
+
+
+def test_call_self_unbound_attribute_stays_unresolved(sample_graph: SymbolGraph) -> None:
+    """No recorded binding -> no edge, and the site feeds the dynamic pool."""
+    calls = _edge_pairs(sample_graph, EdgeKind.CALLS)
+    # Harness.engine is assigned a factory function (unknown return type), so
+    # the dispatch() self-chain stays unresolved.
     assert ("calls.Harness.dispatch", "core.Engine.run") not in calls
-    # The stored engine attribute call is never resolved (blacklist).
-    assert not any("self." in source for source, _ in calls)
+    # Fetcher.client is assigned from a parameter; no class binding exists.
+    assert not any(source == "async_ops.Fetcher.fetch" for source, _ in calls)
 
 
 def test_call_super_init(sample_graph: SymbolGraph) -> None:
@@ -179,4 +193,13 @@ def test_bundled_fixture_counts(sample_bundles: list[RawSymbolBundle]) -> None:
     graph = build_symbol_graph(sample_bundles)
 
     assert graph.node_count == 51
-    assert graph.edge_count == 58
+    # 58 static edges + 2 resolved self-calls (Service.run->Engine.run,
+    # Engine.run->Engine.start) from the v0.2 attribute-binding heuristics.
+    assert graph.edge_count == 60
+
+
+def test_dynamic_out_collects_unresolved_sites(sample_bundles: list[RawSymbolBundle]) -> None:
+    dynamic: list[tuple[str, str, int]] = []
+    build_symbol_graph(sample_bundles, dynamic_out=dynamic)
+
+    assert ("calls.Harness.dispatch", "self.engine.run", 28) in dynamic

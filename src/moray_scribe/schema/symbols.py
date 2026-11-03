@@ -44,6 +44,94 @@ class ImportRef(StrictModel):
     lineno: int = Field(ge=1, description="1-based line number of the import statement.")
 
 
+class RouteInfo(StrictModel):
+    """An HTTP route registration detected from a decorator.
+
+    The scanner fills this only when the decorator text alone proves both the
+    path (a ``/``-rooted string literal) and at least one HTTP method, so the
+    field is a fact, not a guess.
+    """
+
+    path: str = Field(min_length=1, description="URL path as written in the decorator.")
+    methods: list[str] = Field(
+        default_factory=lambda: ["GET"],
+        description="Uppercase HTTP methods accepted by the route.",
+    )
+    decorator: str = Field(
+        default="",
+        description="Raw decorator source text this route was parsed from.",
+    )
+
+
+class UrlPatternRef(StrictModel):
+    """One Django urlconf entry mapping a URL path to a view callable.
+
+    Django registers routes in ``urls.py`` rather than on the view itself, so
+    the scanner records ``path("login/", views.login)`` here and the grapher
+    attaches the resulting :class:`RouteInfo` to the resolved view node.
+    """
+
+    path: str = Field(min_length=1, description="URL pattern as written.")
+    target: str = Field(
+        min_length=1,
+        description="View expression chain, e.g. `views.login` or `LoginView.as_view`.",
+    )
+    caller_qualname: str = Field(
+        min_length=1,
+        description="Qualname of the enclosing scope; the module name at module level.",
+    )
+    lineno: int = Field(ge=1, description="1-based line number of the urlconf call.")
+
+
+class AttrBinding(StrictModel):
+    """A ``self.<attr> = <expr>`` (or ``setattr(self, "<attr>", <expr>)``) site.
+
+    The scanner records the assignment verbatim; deciding whether ``<expr>``
+    denotes a class is the grapher's job (R-2). ``owner_qualname`` is the
+    module-internal qualname of the enclosing class, so ``self.engine.run()``
+    inside any method of that class can later be tied to a concrete type.
+    """
+
+    attr: str = Field(min_length=1, description="Attribute name assigned on self.")
+    value: str = Field(min_length=1, description="Right-hand side source text.")
+    owner_qualname: str = Field(
+        min_length=1,
+        description="Module-internal qualname of the class owning the attribute.",
+    )
+    caller_qualname: str = Field(
+        min_length=1,
+        description="Qualname of the enclosing function; the module name at class body level.",
+    )
+    lineno: int = Field(ge=1, description="1-based line number of the assignment.")
+
+
+class DynamicImportRef(StrictModel):
+    """A literal-string dynamic import (``importlib.import_module("x.y")``).
+
+    Only constant-string targets are recorded; computed module names are left
+    to the LLM inference stage.
+    """
+
+    module: str = Field(min_length=1, description="Literal dotted module path requested.")
+    caller_qualname: str = Field(
+        min_length=1,
+        description="Qualname of the enclosing function; the module name for module-level calls.",
+    )
+    lineno: int = Field(ge=1, description="1-based line number of the call.")
+
+
+class DanglingCall(StrictModel):
+    """An unresolved call site handed to the LLM inference stage.
+
+    ``caller_id`` is a graph node id; ``callee`` keeps the raw source chain.
+    Produced by the grapher, consumed by ``describer.inferencer``.
+    """
+
+    caller_id: str = Field(min_length=1, description="Graph node id of the caller.")
+    callee: str = Field(min_length=1, description="Full source attribute chain of the callee.")
+    lineno: int = Field(ge=1, description="1-based line number of the call.")
+
+
 class CallRef(StrictModel):
     """An unresolved call site discovered inside a function body.
 
@@ -104,6 +192,10 @@ class RawSymbol(StrictModel):
     )
     complexity: int = Field(default=0, ge=0, description="Cyclomatic complexity estimate.")
     tags: list[str] = Field(default_factory=list, description="Free-form scanner tags.")
+    route: RouteInfo | None = Field(
+        default=None,
+        description="HTTP route bound to this symbol by a recognized decorator, if any.",
+    )
 
     @model_validator(mode="after")
     def _check_span(self) -> RawSymbol:
@@ -131,6 +223,18 @@ class RawSymbolBundle(StrictModel):
     parse_errors: list[str] = Field(
         default_factory=list,
         description="Recoverable parser diagnostics; an empty list means a clean parse.",
+    )
+    attr_bindings: list[AttrBinding] = Field(
+        default_factory=list,
+        description="self.<attr> assignments and setattr(self, ...) sites in the file.",
+    )
+    dynamic_imports: list[DynamicImportRef] = Field(
+        default_factory=list,
+        description="Literal-string importlib.import_module/__import__ call sites.",
+    )
+    url_patterns: list[UrlPatternRef] = Field(
+        default_factory=list,
+        description="Django urlconf path()/re_path()/url() entries in the file.",
     )
     source_hash: str | None = Field(
         default=None,

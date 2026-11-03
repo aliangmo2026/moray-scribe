@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
+from moray_scribe.describer.inferencer import InferenceReport, InferredEdge
 from moray_scribe.renderer import draft_to_markdown
 from moray_scribe.schema import (
     EdgeKind,
@@ -63,7 +64,10 @@ def test_markdown_has_all_sections(sample_draft, sample_rendered_graph) -> None:
         "## 四、核心枢纽【引擎统计】",
         "## 五、死代码候选【引擎统计】",
         "## 六、入口点【引擎统计】",
-        "## 七、已知缺口【引擎统计 + AI 提示】",
+        "## 九、已知缺口【引擎统计 + AI 提示】",
+        "## 七、API 路由表【引擎统计】",
+        "## 八、数据流向图【引擎统计】",
+        "## 十、AI 动态推断【AI 推断】",
         "## 附录：项目统计【引擎统计】",
     ):
         assert heading in md
@@ -217,3 +221,37 @@ def test_markdown_hubs_from_full_graph(sample_draft) -> None:
 
     # m.a exists only in full_graph; its row must still render.
     assert "| 1 | `m.a` | class | m | 0.5000 |" in md
+
+
+def test_markdown_inference_diagram_is_deterministic(
+    sample_draft, sample_rendered_graph
+) -> None:
+    """Merged inferred edges must always produce a dashed [AI推断] Mermaid."""
+    inference = InferenceReport(
+        merged=[
+            InferredEdge(
+                src="core.Engine.run",
+                dst="service.Service.handle",
+                confidence="high",
+                reason="self.service assigned in __init__",
+            )
+        ]
+    )
+
+    md = _render(sample_draft, sample_rendered_graph, inference=inference)
+
+    assert "AI 推断补全的调用关系" in md
+    assert "flowchart LR" in md
+    assert "-.->" in md
+    assert "[AI推断]" in md
+
+
+def test_markdown_inference_diagram_absent_without_merges(
+    sample_draft, sample_rendered_graph
+) -> None:
+    inference = InferenceReport(candidates_total=4, selected=2)
+
+    md = _render(sample_draft, sample_rendered_graph, inference=inference)
+
+    assert "AI 推断补全的调用关系" not in md
+    assert "没有任何高置信度推断边被合并" in md

@@ -1,0 +1,7 @@
+# Installed by the Work Buddy sandbox at deploy time (not bundled in the zip).
+# pydantic / pydantic-settings are required by moray_scribe.schema and
+# moray_scribe.config (scanner.walker). tiktoken is deliberately omitted:
+# moray_scribe.utils.tokens is off the static-analysis path used here.
+libcst>=1.4
+pydantic>=2.7
+pydantic-settings>=2.3

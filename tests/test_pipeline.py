@@ -106,7 +106,7 @@ def test_pipeline_doc_writes_architecture_md(
     content = target.read_text(encoding="utf-8")
     assert "## 一、概览【AI 推理】" in content
     assert "## 四、核心枢纽【引擎统计】" in content
-    assert "## 七、已知缺口" in content
+    assert "## 九、已知缺口" in content
 
 
 def test_pipeline_doc_writes_mmd_per_diagram(

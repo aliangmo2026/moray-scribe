@@ -115,6 +115,10 @@ class MermaidEdge(StrictModel):
         description="Semantic relationship kind.",
     )
     style: EdgeStyle = Field(default=EdgeStyle.SOLID, description="Rendered line style.")
+    inferred: bool = Field(
+        default=False,
+        description="True when the edge came from LLM dynamic inference ([AI推断]).",
+    )
 
 
 class MermaidDiagram(StrictModel):

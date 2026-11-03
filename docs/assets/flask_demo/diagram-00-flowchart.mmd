@@ -1,0 +1,28 @@
+flowchart TD
+    subgraph Application["Application"]
+        auth_service["Authentication Service<br/>(hub)"]
+        business_services["Business Services"]
+        order_service["Order Service<br/>(hub)"]
+    end
+    subgraph Data["Data"]
+        domain_models[("Domain Models<br/>(hub)")]
+    end
+    subgraph Infrastructure["Infrastructure"]
+        request_schemas["Request Schemas"]
+    end
+    subgraph Presentation["Presentation"]
+        api_gateway["API Gateway<br/>(hub)"]
+    end
+    api_gateway -->|"imports"| auth_service
+    api_gateway -->|"imports"| order_service
+    api_gateway -->|"imports"| request_schemas
+    auth_service -->|"data_flow"| domain_models
+    business_services -.->|"[AI推断]"| domain_models
+    order_service -->|"calls"| business_services
+    order_service -->|"data_flow"| domain_models
+    subgraph Legend["图例"]
+        L_STATIC["实线 = 静态分析确认的拓扑"]
+        L_INFER["虚线 = AI 推断补全 [AI推断]"]
+    end
+    classDef database fill:#fff3e0,stroke:#f57c00
+    class domain_models database

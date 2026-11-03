@@ -21,12 +21,15 @@ def generate_architecture(
     project_name: str,
     root_path: str,
     mode: Literal["single", "two-phase"] = "single",
+    prior_errors: list[str] | None = None,
 ) -> ArchitectureDraft:
     """Generate one architecture draft from a (possibly oversized) symbol graph.
 
     ``mode="single"`` is the v1 path: optionally prune to ``cfg.max_nodes``, build
     the prompt context, then make one schema-validated Ollama call whose semantic
     validator is :func:`_post_validate`. ``mode="two-phase"`` is reserved for v2.
+    ``prior_errors`` carries validation failures from previous (degraded) ladder
+    attempts so the model corrects instead of repeating them.
     """
     if mode == "two-phase":
         raise NotImplementedError("TODO: v2")
@@ -45,6 +48,16 @@ def generate_architecture(
         edges_json=context.edges_json,
         known_gaps=context.known_gaps,
     )
+    if prior_errors:
+        shown = "\n".join(f"- {error}" for error in prior_errors[-8:])
+        user += (
+            "\n\n# Correction pressure from previous failed attempts\n"
+            "Earlier attempts on a LARGER view of this project were rejected:\n"
+            f"{shown}\n"
+            "You MUST NOT repeat them. Use ONLY node ids and module names that "
+            "appear verbatim in THIS input; never rely on your own knowledge of "
+            "this project."
+        )
     return client.chat_json(
         model=cfg.model_describer,
         system=SYSTEM_PROMPT,

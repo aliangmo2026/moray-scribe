@@ -2,7 +2,7 @@
 
 ![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
-![Tests: 241 passed](https://img.shields.io/badge/tests-241%20passed-green.svg)
+![Tests: 345 passed](https://img.shields.io/badge/tests-345%20passed-green.svg)
 ![Status: Beta](https://img.shields.io/badge/status-Beta-orange.svg)
 
 > 🏗️ **接手的遗留代码看不懂？让它自己画出架构图。**
@@ -14,7 +14,67 @@ moray-scribe 用静态分析先把整个项目的符号与调用拓扑提出来�
 推理，一次性生成分层架构图 + 模块业务说明——**AI 推理和引擎统计严格分区**，可复现、可信任。
 
 它不是"逐文件解释器"：见[真实项目验证报告](docs/realworld-report.md)——在 `psf/requests`
-（6394 行）上跑通扫描、建图、枢纽识别与 Mermaid 渲染的完整链路。
+（6394 行）上跑通扫描、建图、枢纽识别与 Mermaid 渲染的完整链路。大规模验证见
+[压力测试报告](docs/stress-test-report.md) 与 [终极压测报告](docs/ultimate-benchmark.md)。
+
+![终端演示](docs/assets/demo.gif)
+
+*上：`graph` 生成拓扑 → 分阶段性能 → 启动查看器 → 统计 `[AI推断]` 虚线（真实终端输出录制）。*
+
+---
+
+## 🆕 v0.3：看得见、懂框架、跑得快
+
+### 1. 交互式拓扑：拖拽 / 缩放 / 点击看源码
+
+```bash
+moray-scribe graph ./legacy --out out/
+python web_viewer/serve.py out/pruned-graph.json    # → http://127.0.0.1:8765/
+```
+
+![Web UI](docs/assets/web_viewer_demo.png)
+
+- 灰色实线 = 静态确认；**红色流动虚线 = `[AI推断]`**；橙色粗箭头 = ORM 数据流；
+- 点击节点：职责、PageRank、路由徽章、AI 推断理由、调用关系、**源码片段**；
+- 零依赖：原生 Canvas + 标准库 HTTP 服务，不联网、不装 npm 包；
+- 支持深链：`?select=flask_demo.auth.login` 可把某个符号的视图直接贴进 issue。
+
+### 2. 领域特化：路由表 + 数据流向图
+
+Flask/FastAPI 装饰器、Django `urls.py`（`path()` / `re_path()` / `Class.as_view()`）
+都会被解析成确定性路由表；SQLAlchemy/Django ORM 模型被识别为数据库节点，
+`Model.query.get()`、`session.commit()`、`user.save()` 等**可静态确认**的调用画出 `data_flow` 边。
+`ARCHITECTURE.md` 因此多了两节引擎生成的内容：
+
+```markdown
+## 七、API 路由表【引擎统计】
+| 方法 | 路径 | 处理函数 | 模块 |
+| GET/POST | `/login` | `flask_demo.auth.login` | flask_demo.auth |
+
+## 八、数据流向图【引擎统计】
+flowchart TD
+    flask_demo_auth_login ==>|"数据流"| flask_demo_models_User
+```
+
+不猜：`repo.save()` 这种参数类型未知的调用不会伪造边，而是进入 `--infer` 的推断池。
+
+### 3. 更快更省：冷启动 8.3×、内存 -31%
+
+| 指标（7 文件示例） | v0.2 | v0.3 |
+|---|---:|---:|
+| 全静态链路 | 1.25 s | **0.15 s** |
+| 峰值内存 | 97.4 MB | **67.2 MB** |
+
+移除了 numpy/scipy/networkx 三个重依赖，自研 PageRank 幂迭代（与旧值逐位一致）；
+`prune` 不再深拷贝整图。django（**35 万行 / 2,096 文件 / 29,857 节点**）静态链路
+峰值 **479 MB**，完整数据与方法见 [docs/ultimate-benchmark.md](docs/ultimate-benchmark.md)。
+
+### 4. 三个顶级项目的架构一览
+
+见 [SHOWCASE.md](SHOWCASE.md)：flask / sqlalchemy / django 的模块级核心架构图
+（确定性生成）+ 本地模型的一句话点评 —— **图里没有模型幻觉，模型只写那句话**。
+
+---
 
 ## 为什么做这个？
 
@@ -25,22 +85,55 @@ moray-scribe 用静态分析先把整个项目的符号与调用拓扑提出来�
 
 ---
 
-## 三个必须知道的点
+## 四个必须知道的点
 
 1. **上帝视角，不是文件解释器**：一次扫描建全项目符号图，一次生成全局架构——不是逐文件问答。
 2. **AI 不写代码**：大模型只能输出一份经 Pydantic 强校验的 Mermaid 数据 JSON；源码格式由引擎渲染，零幻觉。
 3. **本地优先**：Ollama + 你的模型，代码不出本机。7B 模型就能跑。
+4. **动态死角也有两条路兜底**（v0.2 新增）：静态启发式 + LLM 动态推断（见下节）。
 
 ## 30 秒上手
 
 ```bash
 pip install moray-scribe
 ollama pull qwen2.5:7b
-moray-scribe doc ./your-legacy-project/ --out ./arch-doc/
+moray-scribe doc ./your-legacy-project/ --out ./arch-doc/ --infer
 # → ./arch-doc/ARCHITECTURE.md
 ```
 
-前置：Python ≥ 3.10、[Ollama](https://ollama.com/)、任意 7B+ coder 模型（推荐 `qwen2.5:7b` / `qwen2.5-coder:14b`）。
+前置：Python ≥ 3.10、[Ollama](https://ollama.com/)、任意 7B+ coder 模型（推荐 `qwen2.5:7b` / `qwen3.5:9b`）。
+
+## 🆕 v0.2：动态调用死角攻克（Dynamic Inference）
+
+Python 的动态特性是纯静态分析的死穴——`self.engine.run()` 的 `engine` 是什么类型？
+`importlib.import_module("pkg.sub")` 加载了谁？v0.2 用**两层防线**补盲区：
+
+**第一层：静态启发式（默认开启，零成本、确定性）**
+
+- 追踪 `self.x = ClassA()` / `setattr(self, "x", ClassA())` 赋值，把 `self.x.method()`
+  解析到 `ClassA.method`（工厂函数返回类型未知时保守跳过）；
+- `self.method()` 直接解析到本类方法；
+- `importlib.import_module("pkg.sub")` / `__import__` / `from importlib import import_module`
+  的字面量调用接入模块图。
+
+**第二层：LLM 动态推断（`--infer` 开启，异步批量）**
+
+静态层仍解析不了的**悬空调用**，按 PageRank 排序取前 N 个（`MORAY_SCRIBE_INFERENCE_MAX_CALLS`），
+连同调用方源码片段与候选符号清单，经 `asyncio` 并发送本地模型推断，输出 Pydantic 校验的
+`InferredEdge`：
+
+- **high 置信度** → 合入主图（`inferred=True` 标记）；
+- **medium / low** → 记入「已知缺口」，不合图。
+
+**渲染约定（一眼分清真假）：**
+
+```
+A --> B      实线 = 静态分析确认的拓扑，绝对准确
+A -.-> B     虚线 = AI 推断补全，图中带 [AI推断] 标签并附图例，可能有误
+```
+
+文档新增「八、AI 动态推断」章节：合入边全表（含依据）、中低置信度明细、token 消耗统计。
+整条推断链路可被 Mock 全测（`tests/test_inferencer.py`），不依赖网络。
 
 ## 它长什么样
 
@@ -51,26 +144,29 @@ moray-scribe doc ./your-legacy-project/ --out ./arch-doc/
 **能力证明**：见 [真实项目验证报告](docs/realworld-report.md)——用 qwen2.5:7b 在
 `psf/requests`（6394 行）上原生生成架构草稿，评测结果、问题清单、改进建议全部公开。
 
-**v0.1.1 预告**：`examples/` 目录将在硬件恢复后补充 moray-scribe 自我剖析产物
-（当前机器纯 CPU 推理仅 ~2.5 tok/s，无法在超时内完成 4300 行项目的完整草稿）。
+**示例项目**：`examples/flask_demo/` 是一个可运行的 Flask + SQLAlchemy 小应用，
+其完整产物（`ARCHITECTURE.md` / `pruned-graph.json` / `.mmd`）已提交在
+`docs/assets/flask_demo/`，可直接对照源码阅读。
 
 > `doc` 模式的完整生成依赖本地模型推理速度：7B 模型在千行级项目上通常需 2–10 分钟，
 > 更大的项目或较慢的 CPU 建议调大 `MORAY_SCRIBE_REQUEST_TIMEOUT_S`（或 `--timeout`）与
 > `MORAY_SCRIBE_MAX_OUTPUT_TOKENS`，或换用更快的模型 / GPU 加速。
 
-## 四种模式
+## 五种用法
 
-| 模式 | 输入 | 输出 | 需要 LLM |
+| 用法 | 输入 | 输出 | 需要 LLM |
 |---|---|---|---|
 | `scan` | 目录 | symbol-graph.json | ❌ |
-| `graph` | 目录 | pruned-graph.json（含枢纽/死代码） | ❌ |
+| `graph` | 目录 | pruned-graph.json（含枢纽/死代码/路由/数据流） | ❌ |
+| **`web_viewer`** | pruned-graph.json | 可拖拽的交互拓扑（浏览器） | ❌ |
 | `diagram` | 目录 | architecture-draft.json | ✅ |
-| `doc` | 目录 | **ARCHITECTURE.md + .mmd** | ✅ |
+| `doc` | 目录 | **ARCHITECTURE.md + .mmd + pruned-graph.json** | ✅（`--infer` 再加动态推断） |
 
 ```bash
 moray-scribe scan ./legacy/ --out symbols.json
 moray-scribe graph ./legacy/ --max-nodes 200
-moray-scribe doc ./legacy/ --out ./arch-doc/
+moray-scribe doc ./legacy/ --out ./arch-doc/ --infer
+python web_viewer/serve.py ./arch-doc/pruned-graph.json
 ```
 
 下面是用 moray-scribe 分析 `psf/requests`（6394 行）后生成的架构图实景（GitHub 原生渲染，
@@ -142,7 +238,7 @@ flowchart TD
 
 </details>
 
-## 已知限制（v0.1.0）
+## 已知限制（v0.3.0）
 
 0. **首次跑 doc 需要硬件准备**——7B 模型在纯 CPU 上生成 architecture draft 需要
    2-10 分钟（取决于项目规模与 CPU）。若你的机器被其他任务占用（IDE / 浏览器 / 其他
@@ -153,7 +249,12 @@ flowchart TD
    `100% CPU`，参考 [Ollama GPU 配置](https://github.com/ollama/ollama/blob/main/docs/gpu.md)
    调整。
 - 仅支持 Python（基于 libcst）
-- 动态调用（`getattr` / `importlib`）不解析，会在"已知缺口"里提示
+- 路由识别覆盖 Flask/FastAPI 装饰器与 Django `urls.py` 的常见写法；自定义注册
+  （如自研装饰器、运行时 `add_url_rule` 循环）不识别，会留在已知缺口
+- 数据流只画**静态可确认**的 ORM 调用；参数类型未知的 `repo.save()` 不猜，交给 `--infer`
+- Web UI 是只读查看器（不能改代码），单页建议 ≤ 2,000 节点以保证拖拽流畅
+- 动态调用两层防线仍有边界：`getattr(x, name)` 反射调用、跨文件 monkey-patch、
+  字符串拼接的动态 import 不解析，会留在「已知缺口」；LLM 推断只覆盖有候选目标的调用
 - 多继承 `super()` 歧义跳过（不猜）
 - 大项目（> 5000 符号）需调小 `max_nodes`、调大 `MAX_OUTPUT_TOKENS`
 - 首图强制 flowchart（架构图）；`classDiagram` 仅作可选细节图
@@ -163,14 +264,16 @@ flowchart TD
 ## 文档
 
 - [真实项目验证报告](docs/realworld-report.md)
+- [压力测试报告](docs/stress-test-report.md)（django / sqlalchemy / flask 全链路实测）
 - [架构设计说明](docs/architecture.md)
 - [CHANGELOG](CHANGELOG.md)
 
 ## 🗺️ Roadmap
 
 - [x] v0.1.0: 四模式管线、MCP 接入、核心防幻觉闭环
-- [ ] v0.1.1: 补充真实自我剖析 `examples`，接首批 Issue
-- [ ] v0.2.0: 两阶段生成、R5-2 粒度检测 override、自动评分
+- [x] v0.2.0: 动态调用死角攻克（静态启发式 + LLM 悬空调用推断）、大规模压力测试
+- [ ] v0.2.1: 补充真实自我剖析 `examples`，接首批 Issue
+- [ ] v0.3.0: 两阶段生成、R5-2 粒度检测 override、自动评分
 - [ ] v0.5.0: 支持 JS/TS (tree-sitter)
 
 ## License

@@ -56,6 +56,21 @@ external, gateway, unknown.
 ArchEdgeKind values: imports, calls, inherits, implements, contains, composes,
 depends_on, uses, data_flow.
 
+Input edges marked with inf=1 are AI-INFERED relations (added by the dynamic \
+inference stage, not by static analysis). When you draw such a relation, set \
+its MermaidEdge style to "dashed" and include the tag [AI推断] in the edge \
+label, so readers can tell inference apart from confirmed static topology. \
+Treat inf=1 edges as weaker evidence: do not build layering claims on them alone.
+
+Domain fields (only present when the scanner PROVED them from source):
+- A node with "r" carries an HTTP route: r="METHODS path" (e.g. "GET/POST /login").
+  Draw such handlers as kind "entrypoint" (or "gateway" when they only dispatch),
+  and label edges leaving them with the route path when it helps readability.
+- A node with "o": 1 is an ORM-mapped model class (a database table). Draw such
+  nodes as kind "database".
+- An edge with df=1 is a confirmed DATA FLOW through an ORM/session layer
+  (commit, query, save...). When you draw it, use kind "data_flow".
+
 ModuleNote:
   "module": string,               // MUST be an exact value from the input node `m` field
   "file": string,
@@ -139,6 +154,18 @@ R4. every modules[].symbol_ids MUST be a subset of the input node `i` values
     belonging to that module.
 R5. summary MUST be >= 50 characters and should name at least 2 subsystems.
 R6. every diagram MUST contain at least one node whose kind != "external".
+R7. OUTPUT ECONOMY (hard cap): every symbol_ids list (nodes and modules)
+    holds AT MOST 5 ids — the most representative ones, never an enumeration.
+    Every node.description and module.summary is <= 20 words. Every risk,
+    recommendation and edge label is one short sentence. If you feel the
+    output growing past ~4000 tokens, you are enumerating — STOP and compress.
+R8. Every MermaidNode MUST carry at least ONE id in `symbol_ids`, and `module`
+    MUST be the input `m` value that dominates that node (null only when the
+    node genuinely spans several modules). This is what lets the engine attach
+    confirmed data flows and AI-inferred call edges to your subsystems.
+R9. `style: "dashed"` is RESERVED for input edges with inf=1. Never mark any
+    other edge dashed, and never claim a relation is AI-inferred unless its
+    input edge carried inf=1.
 """
 
 USER_TEMPLATE: str = """\
@@ -149,10 +176,13 @@ Total symbols: {n_nodes}, total edges: {n_edges}
 
 # Input graph (compact form)
 Field legend:
-  Node: i=id, k=kind, n=name, m=module, h=is_hub, e=is_entry, d=docstring (truncated)
-  Edge: s=source, d=destination, k=kind, w=weight
+  Node: i=id, k=kind, n=name, m=module, h=is_hub, e=is_entry, d=docstring (truncated),
+        r=HTTP route ("METHODS path", only when detected), o=1 for ORM model classes
+  Edge: s=source, d=destination, k=kind, w=weight, inf=1 when the edge is \
+AI-inferred (not statically confirmed), df=1 when the edge is a confirmed \
+ORM data-flow relation
   kind values: module, class, function, method
-  edge kind values: contains, imports, inherits, calls, instantiates
+  edge kind values: contains, imports, inherits, calls, instantiates, data_flow
 
 Nodes:
 {nodes_json}

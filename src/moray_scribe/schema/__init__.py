@@ -20,14 +20,28 @@ from .architecture import (
 )
 from .base import StrictModel
 from .graph import EdgeKind, SymbolEdge, SymbolGraph, SymbolNode
-from .symbols import CallRef, ImportRef, RawSymbol, RawSymbolBundle, SymbolKind
+from .symbols import (
+    AttrBinding,
+    CallRef,
+    DanglingCall,
+    DynamicImportRef,
+    ImportRef,
+    RawSymbol,
+    RawSymbolBundle,
+    RouteInfo,
+    SymbolKind,
+    UrlPatternRef,
+)
 
 __all__ = [
     "ArchEdgeKind",
     "ArchitectureDraft",
+    "AttrBinding",
     "CallRef",
+    "DanglingCall",
     "DiagramKind",
     "Direction",
+    "DynamicImportRef",
     "EdgeKind",
     "EdgeStyle",
     "ImportRef",
@@ -38,9 +52,11 @@ __all__ = [
     "NodeKind",
     "RawSymbol",
     "RawSymbolBundle",
+    "RouteInfo",
     "StrictModel",
     "SymbolEdge",
     "SymbolGraph",
     "SymbolKind",
     "SymbolNode",
+    "UrlPatternRef",
 ]

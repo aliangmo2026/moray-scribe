@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from moray_scribe.schema import SymbolGraph, SymbolNode
+from moray_scribe.schema import SymbolEdge, SymbolGraph, SymbolNode
 
 
 def _is_hub(nodes: list[SymbolNode]) -> dict[str, bool]:
@@ -35,8 +35,11 @@ def to_prompt_view(
 
     Keys are deliberately short to keep tokens down: nodes use ``i`` (id),
     ``k`` (kind), ``n`` (name), ``m`` (module), ``h`` (hub), ``e`` (entry),
-    ``d`` (docstring); edges use ``s`` (source), ``d`` (target), ``k`` (kind),
-    ``w`` (weight). Dead-code candidates are dropped unless ``include_dead``.
+    ``d`` (docstring), plus ``r`` (HTTP route, when detected) and ``o=1``
+    (ORM model tag, when detected); edges use ``s`` (source), ``d`` (target),
+    ``k`` (kind), ``w`` (weight), plus ``inf`` (present and 1) only on
+    LLM-inferred edges. Dead-code candidates are dropped unless
+    ``include_dead``.
     """
     nodes = [
         node
@@ -44,8 +47,9 @@ def to_prompt_view(
         if include_dead or not node.is_dead_candidate
     ]
     hubs = _is_hub(nodes)
-    view_nodes: list[dict[str, object]] = [
-        {
+
+    def _view_node(node: SymbolNode) -> dict[str, object]:
+        view: dict[str, object] = {
             "i": node.id,
             "k": node.kind.value,
             "n": node.name,
@@ -54,17 +58,30 @@ def to_prompt_view(
             "e": node.is_entry,
             "d": _truncate(node.docstring, max_description_chars),
         }
-        for node in nodes
-    ]
+        if node.route is not None:
+            methods = "/".join(node.route.methods) or "GET"
+            view["r"] = f"{methods} {node.route.path}"
+        if "orm_model" in node.tags:
+            view["o"] = 1
+        return view
+
+    view_nodes = [_view_node(node) for node in nodes]
 
     keep_ids = {node.id for node in nodes}
-    view_edges: list[dict[str, object]] = [
-        {
+
+    def _view_edge(edge: SymbolEdge) -> dict[str, object]:
+        view: dict[str, object] = {
             "s": edge.source,
             "d": edge.target,
             "k": edge.kind.value,
             "w": edge.weight,
         }
+        if edge.inferred:
+            view["inf"] = 1
+        return view
+
+    view_edges = [
+        _view_edge(edge)
         for edge in graph.edges
         if edge.source in keep_ids and edge.target in keep_ids
     ]

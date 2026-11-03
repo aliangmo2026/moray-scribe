@@ -30,7 +30,7 @@ def test_version_prints_package_version() -> None:
     result = _invoke("--version")
 
     assert result.exit_code == 0
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.3.0"
     assert result.output.strip() == __version__
 
 

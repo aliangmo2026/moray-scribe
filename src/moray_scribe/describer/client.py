@@ -11,6 +11,7 @@ import ollama
 from pydantic import BaseModel, ValidationError
 
 from moray_scribe.exceptions import DescriberError
+from moray_scribe.utils.tokens import estimate_tokens
 
 BaseModelT = TypeVar("BaseModelT", bound=BaseModel)
 
@@ -19,6 +20,18 @@ BaseModelT = TypeVar("BaseModelT", bound=BaseModel)
 # emitting EOS, running until the request times out. Capping output keeps a
 # successful draft fast and a failing one bounded (finding #3).
 _MAX_OUTPUT_TOKENS = 4096
+
+
+def num_ctx_for(system: str, user: str, max_tokens: int) -> int:
+    """Context window for one request: prompt + generation headroom.
+
+    Ollama defaults to a small ``num_ctx`` (4096) and silently truncates the
+    prompt beyond it — a large symbol graph then never reaches the model in
+    full and the draft collapses. Clamp to [4096, 16384] to bound KV-cache
+    memory on small machines.
+    """
+    prompt_tokens = estimate_tokens(system) + estimate_tokens(user)
+    return max(4096, min(16384, prompt_tokens + max_tokens + 512))
 
 
 def _field_names_of(model_name: str, schema: type[BaseModel]) -> list[str]:
@@ -148,6 +161,11 @@ class OllamaClient:
         self.host = host
         self.timeout_s = timeout_s
         self._client = ollama.Client(host=host, timeout=timeout_s)
+        # Usage accounting, updated on every successful round-trip (0 when the
+        # backend omits the counters, e.g. test fakes).
+        self.requests = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
 
     def _chat_once(
         self,
@@ -178,6 +196,7 @@ class OllamaClient:
                 options={
                     "temperature": temperature,
                     "num_predict": max_tokens,
+                    "num_ctx": num_ctx_for(system, user, max_tokens),
                 },
             )
         except (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError) as exc:
@@ -208,6 +227,9 @@ class OllamaClient:
                 "hint: run 'moray-scribe health' to check environment, "
                 "then report with the error text."
             ) from exc
+        self.requests += 1
+        self.prompt_tokens += int(response.get("prompt_eval_count") or 0)
+        self.completion_tokens += int(response.get("eval_count") or 0)
         return str(response["message"]["content"])
 
     def _retry_prompts(

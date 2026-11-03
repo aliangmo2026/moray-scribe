@@ -25,10 +25,6 @@ classifiers = [
 ]
 dependencies = [
     "libcst>=1.4",
-    "networkx>=3.3",
-    # networkx.pagerank dispatches to a SciPy/NumPy power iteration.
-    "numpy>=1.26",
-    "scipy>=1.11",
     "typer>=0.12",
     "rich>=13",
     "pydantic>=2.7",
@@ -55,6 +51,11 @@ dev = [
     "pytest-cov",
     "ruff>=0.5",
     "mypy>=1.10",
+]
+benchmark = [
+    "psutil>=5.9",
+    # benchmarks/make_demo_gif.py renders the terminal demo with Pillow.
+    "pillow>=10",
 ]
 
 [project.scripts]
@@ -89,7 +90,7 @@ files = ["src/moray_scribe/schema", "src/moray_scribe/describer"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["libcst.*", "networkx.*", "ollama.*", "tiktoken.*"]
+module = ["libcst.*", "ollama.*", "tiktoken.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

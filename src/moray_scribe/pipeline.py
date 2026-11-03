@@ -15,7 +15,13 @@ from moray_scribe.describer import (
     detect_known_gaps,
     generate_architecture,
 )
-from moray_scribe.exceptions import ScribeError
+from moray_scribe.describer.inferencer import (
+    InferenceReport,
+    apply_inferred_edges_to_draft,
+    merge_inferred_edges,
+    run_inference_sync,
+)
+from moray_scribe.exceptions import DescriberError, ScribeError
 from moray_scribe.grapher import (
     annotate_degrees,
     build_symbol_graph,
@@ -30,9 +36,13 @@ from moray_scribe.renderer import (
     validate_diagram,
 )
 from moray_scribe.scanner import extract_file, iter_python_files
-from moray_scribe.schema import RawSymbolBundle, SymbolGraph
+from moray_scribe.schema import ArchitectureDraft, RawSymbolBundle, SymbolGraph
 
 Mode = Literal["scan", "graph", "diagram", "doc"]
+
+# Cap on gap notes carried into the rendered document (keeps ARCHITECTURE.md
+# readable on 30k+ symbol repositories).
+_KNOWN_GAP_LIMIT = 200
 
 
 @dataclass
@@ -118,10 +128,21 @@ def _run_scan(root: Path, cfg: Settings, out_dir: Path) -> ScribeResult:
 
 def _run_graph(root: Path, cfg: Settings, out_dir: Path) -> ScribeResult:
     bundles = _scan_bundles(root, cfg)
+    file_count = len(bundles)
+    symbol_count = sum(len(bundle.symbols) for bundle in bundles)
+    module_count = len({bundle.module for bundle in bundles})
     graph = _analyzed_graph(bundles, cfg)
+    # The scanner bundles are the single largest allocation; free them before
+    # serializing so peak RSS is graph-only.
+    del bundles
+    # Stamp provenance so the web viewer can resolve source files and titles.
+    graph.metadata.update({"project": root.name, "root": str(root.resolve())})
     target = out_dir / "pruned-graph.json"
     target.write_text(graph.model_dump_json(indent=2), encoding="utf-8")
     summary = {
+        "files_scanned": file_count,
+        "symbols_count": symbol_count,
+        "modules_count": module_count,
         "nodes": graph.node_count,
         "edges": graph.edge_count,
         "hubs_count": _count_hubs(graph),
@@ -155,6 +176,130 @@ def _run_diagram(
     return ScribeResult(mode="diagram", out_path=target, summary=summary)
 
 
+def _maybe_infer(
+    full_graph: SymbolGraph,
+    root: Path,
+    cfg: Settings,
+    dynamic_pool: list[tuple[str, str, int]],
+    project_name: str,
+) -> InferenceReport | None:
+    """Run LLM dynamic inference when enabled, merging high-confidence edges.
+
+    Inference must never kill a doc run: transport failures and unexpected
+    errors degrade to the static graph with a warning (self-healing §2).
+    """
+    if not cfg.inference_enabled or not dynamic_pool:
+        return None
+    try:
+        report = run_inference_sync(
+            full_graph,
+            cfg,
+            root_path=str(root),
+            dynamic_pool=dynamic_pool,
+            project_name=project_name,
+        )
+        merged = merge_inferred_edges(full_graph, report)
+        logger.info("dynamic inference merged {} edge(s)", merged)
+        return report
+    except ScribeError as exc:
+        logger.warning("dynamic inference skipped: {}", exc)
+    except Exception as exc:
+        logger.warning("dynamic inference failed unexpectedly: {!r}", exc)
+    return None
+
+
+def _format_gap_lines(inference: InferenceReport) -> list[str]:
+    """One readable line per medium/low-confidence inference answer."""
+    lines: list[str] = []
+    for edge in sorted(inference.gaps, key=lambda item: (item.src, item.dst)):
+        callee = f" (call `{edge.callee}`)" if edge.callee else ""
+        lines.append(
+            f"`{edge.src}`{callee} -> `{edge.dst}` [{edge.confidence}]: {edge.reason}"
+        )
+    return lines
+
+
+def _last_errors(exc: DescriberError) -> list[str]:
+    """Extract the validation-error section from a chat_json failure message.
+
+    The message embeds the model's full last output; only the ``errors: [...]``
+    tail is useful as correction pressure for the next ladder rung.
+    """
+    text = str(exc)
+    marker = "errors: ["
+    index = text.find(marker)
+    if index == -1:
+        return [text[:300]]
+    return [text[index + len(marker) :][:1200].rstrip("]")]
+
+
+def _describe_with_fallback(
+    pruned: SymbolGraph,
+    full_graph: SymbolGraph,
+    client: OllamaClient,
+    cfg: Settings,
+    root: Path,
+    project_name: str,
+) -> ArchitectureDraft:
+    """Describe the graph, degrading to smaller views on repeated failure.
+
+    Large prompts can exhaust a small model even with a corrected context
+    window; when the describer cannot produce a valid draft for the full
+    budget, retries on half-sized and then 60-node hub-centered views beat
+    failing the whole run. Validation errors from failed rungs travel with
+    the retry (``prior_errors``) so the model corrects instead of repeating.
+    The final artifact's stats still come from ``full_graph``.
+    """
+    ladder = [
+        cfg.max_nodes,
+        max(10, cfg.max_nodes // 2),
+        max(10, min(60, cfg.max_nodes)),
+    ]
+    budgets: list[int] = []
+    for budget in ladder:
+        if budget not in budgets and budget <= len(full_graph.nodes):
+            budgets.append(budget)
+    if not budgets:  # graph smaller than the smallest budget: single attempt
+        budgets = [len(full_graph.nodes)]
+
+    prior_errors: list[str] = []
+    last_error: DescriberError | None = None
+    for index, budget in enumerate(budgets):
+        try:
+            if index == 0:
+                return generate_architecture(
+                    pruned,
+                    client,
+                    cfg,
+                    project_name=project_name,
+                    root_path=str(root),
+                    prior_errors=prior_errors or None,
+                )
+            logger.warning(
+                "describer failed at {} nodes; retrying with {} nodes (self-heal degrade)",
+                budgets[index - 1],
+                budget,
+            )
+            smaller = prune(
+                full_graph,
+                max_nodes=budget,
+                max_edges=max(100, cfg.max_edges * budget // max(1, cfg.max_nodes)),
+            )
+            return generate_architecture(
+                smaller,
+                client,
+                cfg,
+                project_name=project_name,
+                root_path=str(root),
+                prior_errors=prior_errors or None,
+            )
+        except DescriberError as exc:
+            last_error = exc
+            prior_errors.extend(_last_errors(exc))
+    assert last_error is not None  # the loop only ends after a failure
+    raise last_error
+
+
 def _run_doc(
     root: Path,
     path: Path,
@@ -163,11 +308,14 @@ def _run_doc(
     project_name: str,
 ) -> ScribeResult:
     """Full doc pipeline: scan -> analyze -> describe -> render markdown + mmd files."""
+    dynamic_pool: list[tuple[str, str, int]] = []
     bundles = _scan_bundles(root, cfg)
-    full_graph = build_symbol_graph(bundles)
+    full_graph = build_symbol_graph(bundles, dynamic_out=dynamic_pool)
+    # Frees the largest allocation before the long LLM stages begin; nothing
+    # downstream reads the bundles again.
+    del bundles
     annotate_degrees(full_graph)
     compute_pagerank(full_graph)
-    dead_code = detect_dead_code(full_graph)
     entry_points = detect_entry_points(full_graph)
     if len(full_graph.nodes) > 300:
         logger.warning(
@@ -176,32 +324,60 @@ def _run_doc(
             cfg.max_output_tokens,
         )
 
+    inference = _maybe_infer(full_graph, root, cfg, dynamic_pool, project_name)
+    # Dead code is computed AFTER inference: a merged edge can resurrect an
+    # unreachable candidate, and the report must not contradict the graph.
+    dead_code = detect_dead_code(full_graph)
+
     pruned = prune(full_graph, max_nodes=cfg.max_nodes, max_edges=cfg.max_edges)
+    pruned.metadata.update({"project": project_name, "root": str(root.resolve())})
     client = OllamaClient(
         host=cfg.ollama_host,
         timeout_s=cfg.request_timeout_s,
     )
-    draft = generate_architecture(
-        pruned, client, cfg, project_name=project_name, root_path=str(root)
-    )
+    draft = _describe_with_fallback(pruned, full_graph, client, cfg, root, project_name)
+    if inference is not None:
+        injected = apply_inferred_edges_to_draft(draft, full_graph)
+        logger.info("drew {} inferred edge(s) into diagrams", injected)
 
     core_hubs = sorted(
         ((node_id, full_graph.nodes[node_id].pagerank) for node_id in full_graph.nodes),
         key=lambda item: (-item[1], item[0]),
     )[:20]
 
+    known_gaps = detect_known_gaps(full_graph)
+    if len(known_gaps) > _KNOWN_GAP_LIMIT:
+        # Huge repositories produce thousands of "no recorded calls" notes;
+        # rendering them all bloats the document and the prompt context.
+        remaining = len(known_gaps) - _KNOWN_GAP_LIMIT
+        known_gaps = [
+            *known_gaps[:_KNOWN_GAP_LIMIT],
+            f"… 另有 {remaining} 条同类型缺口（详见 --infer 推断结果与源码）",
+        ]
+    if inference is not None and inference.gaps:
+        known_gaps = [
+            *known_gaps,
+            *(f"[AI推断·未合图] {gap_text}" for gap_text in _format_gap_lines(inference)),
+        ]
+
     markdown = draft_to_markdown(
         draft,
         graph=pruned,
         full_graph=full_graph,
-        known_gaps=detect_known_gaps(full_graph),
+        known_gaps=known_gaps,
         dead_code=dead_code,
         entry_points=entry_points,
         core_hubs=core_hubs,
         project_name=project_name,
+        inference=inference,
     )
     md_path = out_dir / "ARCHITECTURE.md"
     md_path.write_text(markdown, encoding="utf-8")
+
+    # Export the enriched graph next to the document so the interactive viewer
+    # (`python web_viewer/serve.py out/pruned-graph.json`) opens the same picture.
+    graph_path = out_dir / "pruned-graph.json"
+    graph_path.write_text(pruned.model_dump_json(indent=2), encoding="utf-8")
 
     mmd_paths: list[str] = []
     for index, diagram in enumerate(draft.diagrams):
@@ -213,14 +389,29 @@ def _run_doc(
             logger.warning("diagram-{}: {}", index, warning)
 
     logger.info("Architecture doc written to {}", md_path)
-    summary = {
+    summary: dict[str, Any] = {
         "modules_count": len(draft.modules),
         "hubs_count": len(core_hubs),
         "dead_code_count": len(dead_code),
         "diagrams_count": len(draft.diagrams),
         "md_path": str(md_path),
         "mmd_paths": mmd_paths,
+        "describer": {
+            "requests": client.requests,
+            "prompt_tokens": client.prompt_tokens,
+            "completion_tokens": client.completion_tokens,
+        },
     }
+    if inference is not None:
+        summary["inference"] = {
+            "dangling_calls": inference.candidates_total,
+            "sent": inference.selected,
+            "requests": inference.requests,
+            "tokens": inference.total_tokens,
+            "merged": len(inference.merged),
+            "gaps": len(inference.gaps),
+            "rejected": inference.rejected,
+        }
     return ScribeResult(mode="doc", out_path=md_path, summary=summary)
 
 

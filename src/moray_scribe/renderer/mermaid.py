@@ -125,7 +125,37 @@ def _node_shape(node: MermaidNode) -> str:
 
 
 def _edge_arrow(edge: MermaidEdge) -> str:
-    return _ARROW_BY_STYLE[edge.style]
+    """Arrow for an edge, with dashed reserved for AI-inferred relations.
+
+    The schema lets the model choose a style, but the document's legend states
+    "dashed = AI inference". Models routinely mark weak ``uses`` relations
+    dashed, which would silently break that promise. Any dashed/dotted edge
+    that is not ``inferred`` is therefore rendered solid.
+    """
+    style = edge.style
+    if not edge.inferred and style in (EdgeStyle.DASHED, EdgeStyle.DOTTED):
+        style = EdgeStyle.SOLID
+    return _ARROW_BY_STYLE[style]
+
+
+def _has_inferred_edges(diagram: MermaidDiagram) -> bool:
+    """Whether any edge is AI-inferred (the only trigger for the legend)."""
+    return any(edge.inferred for edge in diagram.edges)
+
+
+_LEGEND_NODES = (
+    '        L_STATIC["实线 = 静态分析确认的拓扑"]',
+    '        L_INFER["虚线 = AI 推断补全 [AI推断]"]',
+)
+
+
+def _legend_lines() -> list[str]:
+    """Subgraph legend distinguishing static edges from AI-inferred ones (§3)."""
+    return [
+        '    subgraph Legend["图例"]',
+        *_LEGEND_NODES,
+        "    end",
+    ]
 
 
 def _render_flowchart(diagram: MermaidDiagram) -> str:
@@ -172,11 +202,16 @@ def _render_flowchart(diagram: MermaidDiagram) -> str:
         key=lambda item: (item.source, item.target, item.kind.value, item.label),
     ):
         arrow = _edge_arrow(edge)
-        if edge.label:
-            lines.append(f'    {edge.source} {arrow}|"{_escape_label(edge.label)}"| {edge.target}')
+        label = edge.label
+        if edge.inferred and "[AI推断]" not in label:
+            label = f"{label} [AI推断]" if label else "[AI推断]"
+        if label:
+            lines.append(f'    {edge.source} {arrow}|"{_escape_label(label)}"| {edge.target}')
         else:
             lines.append(f"    {edge.source} {arrow} {edge.target}")
 
+    if _has_inferred_edges(diagram):
+        lines.extend(_legend_lines())
     lines.extend(_class_defs(diagram))
     return "\n".join(lines)
 

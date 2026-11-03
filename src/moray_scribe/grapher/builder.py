@@ -4,6 +4,13 @@ The guiding rule (§2) is: only create an edge when the target is 100%
 identifiable. Anything ambiguous, dynamic, external or attribute-typed is left
 unresolved rather than guessed, because a fabricated edge misleads the
 downstream LLM more than a missing one.
+
+Dynamic inference heuristics (v0.2): the historical blanket blacklist of
+``self.*`` calls is narrowed. A ``self.<attr>.<method>()`` call now resolves
+when the same class records a ``self.<attr> = <ClassName>(...)`` assignment
+(scanner: ``attr_bindings``), and ``self.<method>()`` resolves against the
+caller's own class. Everything still ambiguous stays unresolved and flows to
+the LLM inference stage via ``dynamic_out``.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ from moray_scribe.schema import (
     EdgeKind,
     ImportRef,
     RawSymbolBundle,
+    RouteInfo,
     SymbolEdge,
     SymbolGraph,
     SymbolKind,
@@ -24,6 +32,8 @@ from moray_scribe.schema import (
 )
 
 from .analyzer import annotate_degrees, detect_dead_code, detect_entry_points
+from .dataflow import is_dataflow_shape, resolve_model_op
+from .urlconf import resolve_url_pattern
 
 
 def _node_id(module: str, qualname: str) -> str:
@@ -217,6 +227,122 @@ def _caller_node_id(
     return candidate if candidate in graph.nodes else module_id
 
 
+def _caller_class_qualname(caller_qualname: str, module: str) -> str | None:
+    """Qualname of the class enclosing ``caller_qualname``, or None.
+
+    ``Service.run`` -> ``Service``; ``Outer.Inner.reveal`` -> ``Outer.Inner``;
+    a module-level caller (equal to the module or a plain function) -> None.
+    """
+    if caller_qualname == module or "." not in caller_qualname:
+        return None
+    return caller_qualname.rsplit(".", 1)[0]
+
+
+def _resolve_attr_value(module: str, text: str, idx: _Indexes, graph: SymbolGraph) -> str | None:
+    """Resolve a ``self.<attr> = <expr>`` right-hand side to a CLASS node id.
+
+    Accepts ``ClassName``, ``ClassName(...)`` and ``mod.ClassName(...)`` (call
+    parentheses are stripped); a factory function is deliberately rejected
+    because its return type is unknown, keeping the map class-only.
+    """
+    expr = text.strip()
+    while expr.endswith("()"):
+        expr = expr[:-2].rstrip()
+    if "(" in expr:
+        expr = expr.split("(", 1)[0].rstrip()
+    if not expr or expr in {"None", "self", "cls"}:
+        return None
+    target = _resolve_call(module, expr, idx)
+    if target is None:
+        return None
+    node = graph.nodes.get(target)
+    if node is not None and node.kind is SymbolKind.CLASS:
+        return target
+    return None
+
+
+def _build_attr_types(
+    bundles: Iterable[RawSymbolBundle],
+    idx: _Indexes,
+    graph: SymbolGraph,
+) -> dict[tuple[str, str, str], str]:
+    """Map ``(module, class qualname, attr)`` -> class node id from assignments.
+
+    An attribute assigned more than one distinct class across methods is left
+    out entirely (conservative: the static type depends on construction order).
+    """
+    candidates: dict[tuple[str, str, str], set[str]] = {}
+    for bundle in bundles:
+        module = bundle.module
+        for binding in bundle.attr_bindings:
+            target = _resolve_attr_value(module, binding.value, idx, graph)
+            if target is None:
+                continue
+            key = (module, binding.owner_qualname, binding.attr)
+            candidates.setdefault(key, set()).add(target)
+    return {
+        key: next(iter(targets))
+        for key, targets in candidates.items()
+        if len(targets) == 1 and next(iter(targets)) in graph.nodes
+    }
+
+
+def _resolve_self_call(
+    module: str,
+    callee: str,
+    caller_qualname: str,
+    idx: _Indexes,
+    attr_types: dict[tuple[str, str, str], str],
+    graph: SymbolGraph,
+) -> str | None:
+    """Resolve a ``self.*`` callee to a node id, or None when unconfirmed.
+
+    Two confirmed shapes: ``self.<method>()`` against the caller's own class,
+    and ``self.<attr>.<rest>()`` where ``attr`` was assigned a known class in
+    the same class scope (v0.2 dynamic heuristics; see module docstring).
+    """
+    rest = callee[len("self.") :]
+    if not rest:
+        return None
+    caller_class = _caller_class_qualname(caller_qualname, module)
+    if caller_class is None:
+        return None
+    attr, _, remainder = rest.partition(".")
+    if not remainder:
+        target = idx.sym(module, f"{caller_class}.{attr}")
+        if target is not None:
+            return target
+        return None
+    class_id = attr_types.get((module, caller_class, attr))
+    if class_id is None:
+        return None
+    owner = graph.nodes.get(class_id)
+    if owner is None:
+        return None
+    return idx.sym(owner.module, f"{owner.qualname}.{remainder}")
+
+
+def _resolve_dynamic_import(module_str: str, idx: _Indexes) -> str | None:
+    """Deepest known module node for a literal ``import_module`` target."""
+    parts = module_str.split(".")
+    for i in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:i])
+        target = idx.modules.get(prefix)
+        if target is not None:
+            return target
+    return None
+
+
+def _is_external_chain(module: str, callee: str, idx: _Indexes) -> bool:
+    """Whether a dotted callee's root is an import bound outside the graph."""
+    root = callee.split(".", 1)[0]
+    entry = idx.alias(module, root)
+    if entry is None:
+        return False
+    target_module, _ = entry
+    return target_module not in idx.modules
+
+
 def _record_import_alias(idx: _Indexes, module: str, ref: ImportRef) -> None:
     """Index one ImportRef into the module's local-alias table (phase 1)."""
     target_module = ref.module
@@ -277,12 +403,16 @@ def build_symbol_graph(
     *,
     strict: bool = False,
     debug_out: list[tuple[str, str]] | None = None,
+    dynamic_out: list[tuple[str, str, int]] | None = None,
 ) -> SymbolGraph:
     """Merge scanner bundles into one :class:`SymbolGraph`.
 
     ``strict`` runs ``validate_edges`` after construction and raises
     :class:`GraphError` on any dangling edge. ``debug_out`` collects unresolved
     bare calls as ``(caller_id, callee)`` for tuning, never entering the graph.
+    ``dynamic_out`` collects every unresolved call site as
+    ``(caller_id, callee, lineno)`` — the candidate pool the LLM inference
+    stage draws from.
     """
     materialized = list(bundles)
     graph = SymbolGraph()
@@ -290,6 +420,7 @@ def build_symbol_graph(
     pending: dict[tuple[str, str, EdgeKind], float] = {}
     inherits: dict[str, list[str]] = {}
     unresolved: list[tuple[str, str]] = []
+    dynamic: list[tuple[str, str, int]] = []
 
     def _emit(src: str | None, dst: str | None, kind: EdgeKind) -> None:
         if src is None or dst is None or src == dst:
@@ -342,6 +473,8 @@ def build_symbol_graph(
                     is_async=raw.is_async,
                     is_public=raw.is_public,
                     complexity=raw.complexity,
+                    tags=list(raw.tags),
+                    route=raw.route,
                     metadata={"bases": list(raw.bases)},
                 )
             )
@@ -350,6 +483,9 @@ def build_symbol_graph(
                 idx.classes.setdefault(module, {})[raw.name] = node_id
         for ref in bundle.imports:
             _record_import_alias(idx, module, ref)
+
+    # -- Phase 1.5: self-attribute type map ---------------------------------
+    attr_types = _build_attr_types(materialized, idx, graph)
 
     # -- Phase 2: edges -----------------------------------------------------
     for bundle in materialized:
@@ -386,23 +522,71 @@ def build_symbol_graph(
         for ref in bundle.imports:
             _emit_import_edges(idx, module, mod_node_id, ref, pending)
 
+        # b3) literal dynamic imports (importlib.import_module / __import__)
+        for dyn in bundle.dynamic_imports:
+            caller = _caller_node_id(module, mod_node_id, dyn.caller_qualname, graph)
+            target = _resolve_dynamic_import(dyn.module, idx)
+            if target is not None and target != caller:
+                _emit(caller, target, EdgeKind.IMPORTS)
+
+        # b4) Django urlconf entries: attach the route to the resolved view
+        for pattern in bundle.url_patterns:
+            view_id = resolve_url_pattern(module, pattern.target, idx, graph)
+            if view_id is None:
+                continue
+            view_node = graph.nodes.get(view_id)
+            if view_node is not None and view_node.route is None:
+                view_node.route = RouteInfo(
+                    path=pattern.path if pattern.path.startswith("/") else f"/{pattern.path}",
+                    methods=["ANY"],
+                    decorator=f"urlconf: {pattern.path or '/'}",
+                )
+
         # c) calls / instantiations
         for call in bundle.calls:
             src = _caller_node_id(module, mod_node_id, call.caller_qualname, graph)
             callee = call.callee
             first = callee.split(".")[0]
             if first == "self":
-                continue  # blacklist: no attribute type inference
+                target = _resolve_self_call(
+                    module, callee, call.caller_qualname, idx, attr_types, graph
+                )
+                if target is None:
+                    if callee != "self":
+                        dynamic.append((src, callee, call.lineno))
+                    continue
+                kind = (
+                    EdgeKind.INSTANTIATES
+                    if graph.nodes[target].kind is SymbolKind.CLASS
+                    else EdgeKind.CALLS
+                )
+                _emit(src, target, kind)
+                if kind is EdgeKind.CALLS and is_dataflow_shape(callee):
+                    _emit(src, target, EdgeKind.DATA_FLOW)
+                continue
             if first == "super":
                 target = _resolve_super(
                     module, callee, call.caller_qualname, idx, inherits, graph
                 )
+                if target is None:
+                    dynamic.append((src, callee, call.lineno))
                 _emit(src, target, EdgeKind.CALLS)
                 continue
             target = _resolve_call(module, callee, idx)
             if target is None:
+                # ``User.query.get(...)`` style: the receiver class IS the data
+                # target even though the chain itself cannot fully resolve.
+                df_target = resolve_model_op(module, callee, idx, graph)
+                if df_target is not None and df_target != src:
+                    _emit(src, df_target, EdgeKind.DATA_FLOW)
+                    continue
                 if "." not in callee:
                     unresolved.append((src, callee))
+                    dynamic.append((src, callee, call.lineno))
+                elif not _is_external_chain(module, callee, idx):
+                    # Dotted chains rooted at a local name (not an external
+                    # import) are the prime dynamic-dispatch candidates.
+                    dynamic.append((src, callee, call.lineno))
                 continue
             target_node = graph.nodes.get(target)
             kind = (
@@ -411,6 +595,8 @@ def build_symbol_graph(
                 else EdgeKind.CALLS
             )
             _emit(src, target, kind)
+            if kind is EdgeKind.CALLS and is_dataflow_shape(callee):
+                _emit(src, target, EdgeKind.DATA_FLOW)
 
     # -- Phase 3: emit, degrees, annotations --------------------------------
     for (src, dst, kind), weight in pending.items():
@@ -428,6 +614,8 @@ def build_symbol_graph(
 
     if debug_out is not None:
         debug_out.extend(unresolved)
+    if dynamic_out is not None:
+        dynamic_out.extend(dynamic)
 
     if strict:
         problems = graph.validate_edges()

@@ -41,8 +41,13 @@ def _node(
     )
 
 
-def _edge(source: str, target: str, kind: EdgeKind = EdgeKind.CALLS) -> SymbolEdge:
-    return SymbolEdge(source=source, target=target, kind=kind)
+def _edge(
+    source: str,
+    target: str,
+    kind: EdgeKind = EdgeKind.CALLS,
+    weight: float = 1.0,
+) -> SymbolEdge:
+    return SymbolEdge(source=source, target=target, kind=kind, weight=weight)
 
 
 def test_degrees_basic() -> None:
@@ -164,3 +169,45 @@ def test_entry_point_via_main_module() -> None:
     graph = SymbolGraph(nodes={"m.func": func})
 
     assert detect_entry_points(graph) == ["m.func"]
+
+
+def test_pagerank_parallel_edges_use_last_weight() -> None:
+    """Regression pin: parallel edges collapse last-write-wins (old nx behaviour).
+
+    The previous implementation built a ``networkx.DiGraph``, where a second
+    ``add_edge`` for the same pair overwrites the weight. The dependency-free
+    power iteration must reproduce that so rankings do not shift.
+    """
+    duplicate = SymbolGraph(
+        nodes={"a": _node("a"), "b": _node("b"), "c": _node("c")},
+        edges=[
+            _edge("b", "a", weight=1.0),
+            _edge("b", "a", weight=5.0),
+            _edge("c", "a", weight=2.0),
+        ],
+    )
+    collapsed = SymbolGraph(
+        nodes={"a": _node("a"), "b": _node("b"), "c": _node("c")},
+        edges=[_edge("b", "a", weight=5.0), _edge("c", "a", weight=2.0)],
+    )
+
+    first = compute_pagerank(duplicate)
+    second = compute_pagerank(collapsed)
+
+    assert first == pytest.approx(second, rel=0, abs=1e-12)
+
+
+def test_pagerank_has_no_heavyweight_imports() -> None:
+    """The analyzer must stay importable without numpy/scipy/networkx."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import moray_scribe.grapher.analyzer;"
+        "bad = [m for m in ('networkx','numpy','scipy') if m in sys.modules];"
+        "print(','.join(bad))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == ""

@@ -169,6 +169,42 @@ def doc(
         int | None,
         typer.Option("--timeout", min=60, help="Ollama request timeout in seconds."),
     ] = None,
+    infer: Annotated[
+        bool | None,
+        typer.Option(
+            "--infer/--no-infer",
+            help="Run LLM dynamic inference on dangling calls (default: settings).",
+        ),
+    ] = None,
+    infer_calls: Annotated[
+        int | None,
+        typer.Option(
+            "--infer-max-calls",
+            min=0,
+            help="Cap on dangling calls sent to the model (top PageRank first).",
+        ),
+    ] = None,
+    infer_concurrency: Annotated[
+        int | None,
+        typer.Option(
+            "--infer-concurrency",
+            min=1,
+            max=16,
+            help=(
+                "Concurrent inference requests; tune to GPU VRAM "
+                "(see docs/ultimate-benchmark.md)."
+            ),
+        ),
+    ] = None,
+    infer_batch: Annotated[
+        int | None,
+        typer.Option(
+            "--infer-batch-size",
+            min=1,
+            max=64,
+            help="Call sites per inference request.",
+        ),
+    ] = None,
     config: Annotated[
         Path | None,
         typer.Option("--config", help="Path to a .env configuration file."),
@@ -180,8 +216,19 @@ def doc(
 ) -> None:
     """Generate the full Markdown reverse-engineering document."""
     cfg = _resolve_settings(config, verbose)
+    updates: dict[str, object] = {}
     if timeout is not None:
-        cfg = cfg.model_copy(update={"request_timeout_s": timeout})
+        updates["request_timeout_s"] = timeout
+    if infer is not None:
+        updates["inference_enabled"] = infer
+    if infer_calls is not None:
+        updates["inference_max_calls"] = infer_calls
+    if infer_concurrency is not None:
+        updates["inference_concurrency"] = infer_concurrency
+    if infer_batch is not None:
+        updates["inference_batch_size"] = infer_batch
+    if updates:
+        cfg = cfg.model_copy(update=updates)
     _execute("doc", path, cfg, out)
 
 

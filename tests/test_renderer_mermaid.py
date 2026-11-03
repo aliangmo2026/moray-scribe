@@ -140,16 +140,32 @@ def test_layer_subgraph_grouping() -> None:
     assert 'C("Gamma")' in text
 
 
-def test_edge_style_dashed() -> None:
-    text = diagram_to_mermaid(
+def test_edge_style_dashed_requires_inferred() -> None:
+    """A dashed edge is only honored when it is AI-inferred.
+
+    The document's legend promises "dashed = AI inference"; a model-chosen
+    dashed style on a confirmed relation would silently break that promise, so
+    the renderer forces such edges solid.
+    """
+    not_inferred = diagram_to_mermaid(
         MermaidDiagram(
             kind=DiagramKind.FLOWCHART,
             nodes=[_n("A", "Alpha"), _n("B", "Beta")],
             edges=[_e("A", "B", EdgeStyle.DASHED)],
         )
     )
+    inferred = diagram_to_mermaid(
+        MermaidDiagram(
+            kind=DiagramKind.FLOWCHART,
+            nodes=[_n("A", "Alpha"), _n("B", "Beta")],
+            edges=[
+                MermaidEdge(source="A", target="B", style=EdgeStyle.DASHED, inferred=True)
+            ],
+        )
+    )
 
-    assert "A -.-> B" in text
+    assert "A --> B" in not_inferred
+    assert 'A -.->|"[AI推断]"| B' in inferred
 
 
 def test_edge_style_thick() -> None:
@@ -243,3 +259,27 @@ def test_all_edge_styles_have_arrows(style: EdgeStyle) -> None:
     )
 
     assert "A " in text and " B" in text
+
+
+def test_dashed_non_inferred_edge_renders_solid() -> None:
+    """Dashed is reserved for AI inference; model style choices cannot break it."""
+    diagram = MermaidDiagram(
+        kind=DiagramKind.FLOWCHART,
+        nodes=[_n("A", "Alpha"), _n("B", "Beta")],
+        edges=[
+            _e("A", "B", EdgeStyle.DASHED, label="uses"),
+            MermaidEdge(
+                source="B",
+                target="A",
+                label="[AI推断]",
+                kind=ArchEdgeKind.CALLS,
+                style=EdgeStyle.DASHED,
+                inferred=True,
+            ),
+        ],
+    )
+
+    rendered = diagram_to_mermaid(diagram)
+
+    assert 'A -->|"uses"| B' in rendered
+    assert 'B -.->|"[AI推断]"| A' in rendered
