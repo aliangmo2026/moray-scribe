@@ -64,10 +64,11 @@ def test_markdown_has_all_sections(sample_draft, sample_rendered_graph) -> None:
         "## 四、核心枢纽【引擎统计】",
         "## 五、死代码候选【引擎统计】",
         "## 六、入口点【引擎统计】",
-        "## 九、已知缺口【引擎统计 + AI 提示】",
         "## 七、API 路由表【引擎统计】",
         "## 八、数据流向图【引擎统计】",
-        "## 十、AI 动态推断【AI 推断】",
+        "## 九、核心业务时序图",
+        "## 十、已知缺口【引擎统计 + AI 提示】",
+        "## 十一、AI 动态推断【AI 推断】",
         "## 附录：项目统计【引擎统计】",
     ):
         assert heading in md
@@ -255,3 +256,85 @@ def test_markdown_inference_diagram_absent_without_merges(
 
     assert "AI 推断补全的调用关系" not in md
     assert "没有任何高置信度推断边被合并" in md
+
+
+# --------------------------------------------------------------------------
+# 九、核心业务时序图
+# --------------------------------------------------------------------------
+
+
+def _sequence_flow(title: str, entry: str, source: str = "ai"):
+    from moray_scribe.schema import (
+        SequenceFlow,
+        SequenceMessage,
+        SequenceParticipant,
+    )
+
+    return SequenceFlow(
+        entry=entry,
+        title=title,
+        summary=f"{title}的概述说明。",
+        participants=[
+            SequenceParticipant(key="Web", label="Web 前端"),
+            SequenceParticipant(key="API", label="后端 API"),
+        ],
+        messages=[
+            SequenceMessage(sender="Web", receiver="API", label="POST /login"),
+            SequenceMessage(sender="API", receiver="Web", label="200 OK"),
+        ],
+        source=source,  # type: ignore[arg-type]
+    )
+
+
+def test_sequence_section_renders_ai_flows(sample_draft, sample_rendered_graph) -> None:
+    flows = [_sequence_flow("登录流程", "web.login"), _sequence_flow("下单流程", "shop.order")]
+
+    md = _render(sample_draft, sample_rendered_graph, sequence_flows=flows)
+
+    assert "## 九、核心业务时序图【AI 推理】" in md
+    assert "### 1. 登录流程" in md
+    assert "### 2. 下单流程" in md
+    assert "**入口**：`web.login`" in md
+    assert "```mermaid" in md
+    assert "sequenceDiagram" in md
+    assert "Web->>API: POST /login" in md
+    assert flows[0].summary in md
+
+
+def test_sequence_section_degraded_tag(sample_draft, sample_rendered_graph) -> None:
+    flows = [_sequence_flow("登录流程", "web.login", source="engine")]
+
+    md = _render(
+        sample_draft, sample_rendered_graph, sequence_flows=flows, sequence_degraded=True
+    )
+
+    assert "## 九、核心业务时序图【引擎统计】" in md
+    assert "确定性降级" in md
+    assert "由引擎从入口点确定性追踪生成" in md
+
+
+def test_sequence_section_empty_when_not_run(sample_draft, sample_rendered_graph) -> None:
+    md = _render(sample_draft, sample_rendered_graph)
+
+    assert "## 九、核心业务时序图【引擎统计】" in md
+    assert "未追踪到可绘制时序图的调用链" in md
+    assert "sequenceDiagram" not in md
+
+
+def test_sequence_flows_capped_at_limit(sample_draft, sample_rendered_graph) -> None:
+    flows = [_sequence_flow(f"流程{i}", f"mod.entry{i}") for i in range(9)]
+
+    md = _render(sample_draft, sample_rendered_graph, sequence_flows=flows)
+
+    assert "### 8. 流程7" in md
+    assert "### 9. 流程8" not in md
+    assert "等 9 个流程" in md
+
+
+def test_sequence_before_known_gaps_order(sample_draft, sample_rendered_graph) -> None:
+    flows = [_sequence_flow("登录流程", "web.login")]
+
+    md = _render(sample_draft, sample_rendered_graph, sequence_flows=flows)
+
+    assert md.index("## 九、核心业务时序图") < md.index("## 十、已知缺口")
+    assert md.index("## 十、已知缺口") < md.index("## 十一、AI 动态推断")

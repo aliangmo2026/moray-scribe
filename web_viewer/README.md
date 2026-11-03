@@ -1,7 +1,7 @@
 # moray-scribe Web Viewer
 
-零依赖的交互式符号拓扑浏览器。不联网、不装 npm 包、不依赖 CDN——只用 HTML +
-原生 JavaScript + Canvas 2D。
+零依赖的交互式符号拓扑浏览器 + **图谱 RAG 问答**。不联网、不装 npm 包、
+不依赖 CDN——只用 HTML + 原生 JavaScript + Canvas 2D + Python 标准库。
 
 ![demo](../docs/assets/web_viewer_demo.png)
 
@@ -34,10 +34,33 @@ python web_viewer/serve.py out/pruned-graph.json \
 | 单击节点 | 侧边栏：职责/文档、PageRank、度数、复杂度、路由、源码 |
 | 双击节点 | 把该节点居中 |
 | 搜索框 | 按符号 / 模块 / 路由过滤（`/` 聚焦，回车跳到首个命中） |
+| `C` / 💬 按钮 | 打开图谱问答（Graph RAG Chat，需本机 Ollama） |
 | `F` / `R` | 适应窗口 / 重新布局 |
-| `Esc` | 取消选择 |
+| `Esc` | 关闭问答面板 / 取消选择 |
 | 图例底部 | 按类型筛选、隐藏死代码候选 |
 | 导出 PNG | 把当前视图存成图片 |
+
+## 图谱问答（Graph RAG Chat，v0.4）
+
+右下角 💬 打开对话框，用自然语言向**符号图**提问，例如
+「修改 login 逻辑会影响哪些模块？」。流程：
+
+1. 检索：词法打分（符号名 / id / 模块 / 路由 / 文档）选种子 →
+   **反向 BFS** 找所有调用方（影响面）→ 单跳正向扩展 → PageRank 决定
+   子图预算（默认 ≤ 24 节点）→ 最多 4 片源码切片（防目录穿越）；
+2. 问答：检索子图 + 切片 + 问题 → 本机 Ollama（JSON 回答 + 引用节点）；
+3. 高亮：回答中的**节点芯片点击直接画布选中+居中**；未引用具体节点时
+   展示检索到的相关节点。
+
+启动参数：
+
+```bash
+python web_viewer/serve.py out/pruned-graph.json \
+    --ollama-host http://127.0.0.1:11434 --chat-model qwen2.5:7b
+python web_viewer/serve.py out/pruned-graph.json --no-chat   # 关闭问答
+```
+
+Ollama 离线时问答返回 502（气泡内提示），其余功能不受影响。
 
 ## 视觉语义
 
@@ -69,11 +92,14 @@ http://127.0.0.1:8765/?select=flask_demo.auth.login&settle=400
 
 ## API
 
-查看器背后的三个只读接口，也方便二次集成：
+查看器背后的只读接口 + 问答接口，方便二次集成：
 
-- `GET /api/config` → 项目名、扫描根、节点数
+- `GET /api/config` → 项目名、扫描根、节点数、chat 是否启用
 - `GET /api/graph` → 原始图谱 JSON
 - `GET /api/source?file=&start=&end=` → 源码片段（限制在扫描根内，防目录穿越）
+- `POST /api/chat` → `{"question": "..."}` → `{"answer", "nodes", "degraded",
+  "context": {nodes, edges, slices}, "context_nodes"}`（Graph RAG：反向 BFS
+  子图检索 + PageRank 预算 + 源码切片；Ollama 不可用时 502）
 
 ## 数据来源
 

@@ -2,7 +2,7 @@
 
 ![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
-![Tests: 345 passed](https://img.shields.io/badge/tests-345%20passed-green.svg)
+![Tests: 458 passed](https://img.shields.io/badge/tests-458%20passed-green.svg)
 ![Status: Beta](https://img.shields.io/badge/status-Beta-orange.svg)
 
 > 🏗️ **接手的遗留代码看不懂？让它自己画出架构图。**
@@ -20,6 +20,109 @@ moray-scribe 用静态分析先把整个项目的符号与调用拓扑提出来�
 ![终端演示](docs/assets/demo.gif)
 
 *上：`graph` 生成拓扑 → 分阶段性能 → 启动查看器 → 统计 `[AI推断]` 虚线（真实终端输出录制）。*
+
+---
+
+## 🆕 v0.5：开箱即用 · 10 项目实证 · 离线测试生态
+
+### 1. Docker 一条命令，Web UI 直接跑
+
+```bash
+docker compose up          # → http://localhost:8000
+```
+
+挂载你的项目到 `/work`（compose 默认演示 flask_demo），图谱产物落 `/data` 卷；
+**模型不出本机**——容器里的 Graph RAG 问答经 `host.docker.internal` 连宿主机
+Ollama。`python:3.12-slim` 314MB，非 root 用户，pip 源可切换。
+
+### 2. 没装 Python？一键安装
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+```bash
+# Linux / macOS
+bash install.sh
+# 国内： MORAY_PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple bash install.sh
+```
+
+自动找 Python≥3.10（找不到给明确指引）、建独立 venv、优先本地 `dist/` wheel、
+检查 Ollama——不碰系统环境。
+
+### 3. 10 个顶级项目的实测榜单
+
+[docs/benchmark-leaderboard.md](docs/benchmark-leaderboard.md) —— tqdm / flask /
+requests / pandas / scrapy / click / rich / pydantic / fastapi / aiohttp，
+graph+doc 全链路计时、节点/枢纽/死代码/时序图统计。**每个数字都是机器写出的**
+（`benchmarks/run_leaderboard.py` → JSONL → `render_leaderboard.py` 渲染），
+复现只需三条命令。
+
+### 4. 离线测试生态（CI 友好）
+
+`benchmarks/capture_recordings.py` 把**真实模型输出**录制为回放资产；
+`mock_ollama` fixture 在本地起一个 Ollama 线协议回放服务器；
+**autouse 离线守卫**让任何试图连接真实 Ollama 端口的测试当场报错——
+没有 Ollama 的机器照样 100% 测试全绿。
+
+### 5. 多语言可行性（tree-sitter 实证）
+
+`benchmarks/test_tree_sitter.py`：TypeScript 与 Go 样例经 tree-sitter 解析后
+**零改动映射进现有 SymbolGraph 契约**（0 悬挂边）。改造评估见
+[docs/multi-lang-future.md](docs/multi-lang-future.md)——schema/描述/渲染/
+Viewer/RAG 全层语言无关，工作量集中在调用边解析与框架特化。
+
+## 🆕 v0.4：业务时序图 · Graph RAG 问答 · CI 架构体检
+
+### 1. 从"模块在哪"到"流程怎么走"：核心业务时序图
+
+```bash
+moray-scribe doc ./your-legacy-project/ --out ./arch-doc/
+# ARCHITECTURE.md 新增「九、核心业务时序图」
+```
+
+引擎先从入口点（HTTP 路由 / `main` / CLI / `__init__`）沿 `calls`/`instantiates`
+边做**确定性调用链追踪**（PageRank 优先、环剪枝、深度预算），再把链路交给本地
+模型生成业务命名的 Mermaid `sequenceDiagram`：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Web as Web 前端
+    participant Auth as auth 模块
+    Web->>Auth: POST /login
+    Auth-->>Web: 200 OK
+```
+
+- AI 推理与引擎统计照旧分区：模型校验失败自动**确定性降级**（引擎直绘调用链时序，
+  章节挂【引擎统计】标签），文档永远不缺时序图；
+- `doc` 同时导出 `sequence-NN.mmd`，可贴进 issue 或 IDE Mermaid 插件。
+
+### 2. 图谱 RAG 问答：Web UI 能看，也能问
+
+```bash
+python web_viewer/serve.py out/pruned-graph.json   # 点右下角 💬 问答（快捷键 C）
+```
+
+> "如果我要修改用户登录逻辑，会影响到哪些模块？"
+
+后端不把全量代码丢给模型：**先用图算法检索**——词法打分选种子 → **反向 BFS**
+找所有调用方（影响面）→ PageRank 决定子图预算 → 源码切片防穿越——再把
+"问题 + 检索子图 + 切片"交给 Ollama。回答中的节点芯片**点击直接在画布上高亮**。
+仍零依赖：检索与 Ollama 调用全部用标准库实现。
+
+### 3. 一劳永逸：GitHub Action 架构体检
+
+```bash
+# 本地就能跑的 CI 门禁
+moray-scribe check . --baseline before/pruned-graph.json --fail-on dead
+```
+
+把 [`.github/workflows/arch-check.yml`](.github/workflows/arch-check.yml) 拷进
+你的仓库：每次 PR 自动在 merge-base 与 PR head 各跑一遍 `graph`，
+**新增死代码 → 红灯 + 自动 PR 评论**；top-10 PageRank 枢纽出局/腰斩/新进榜
+→ ⚠️ 报警表。无 Secret、权限最小化。详见
+[docs/github_action.md](docs/github_action.md)。
 
 ---
 
@@ -238,7 +341,16 @@ flowchart TD
 
 </details>
 
-## 已知限制（v0.3.0）
+## 已知限制（v0.4.0）
+
+- **时序图链路**：调用链追踪只沿 `calls`/`instantiates` 静态边（含已合并的
+  `[AI推断]` 边）；纯动态分发（反射、字符串路由）不在链上，会留在「已知缺口」。
+  模型命名的流程标题/摘要有可能不准确（引擎只保证调用顺序为真）。
+- **Graph RAG 问答**：检索是词法 + 图结构（CJK 按二元组匹配），没有向量库；
+  提问里最好带上符号名 / 路由 / 模块名等英文关键词。Ollama 离线时 chat 返回
+  502，查看器其余功能不受影响。
+- **架构体检**：`check` 假设两份图谱用相同的 `--max-nodes` / `--exclude` 生成
+  （工作流已固定）；死代码是候选而非判决，删除前请人工确认。
 
 0. **首次跑 doc 需要硬件准备**——7B 模型在纯 CPU 上生成 architecture draft 需要
    2-10 分钟（取决于项目规模与 CPU）。若你的机器被其他任务占用（IDE / 浏览器 / 其他
@@ -272,8 +384,9 @@ flowchart TD
 
 - [x] v0.1.0: 四模式管线、MCP 接入、核心防幻觉闭环
 - [x] v0.2.0: 动态调用死角攻克（静态启发式 + LLM 悬空调用推断）、大规模压力测试
+- [x] v0.3.0: 交互式拓扑、领域特化（路由/数据流）、零依赖 PageRank、极限压测
+- [x] v0.4.0: 业务时序图、Graph RAG 问答、GitHub Action 架构体检
 - [ ] v0.2.1: 补充真实自我剖析 `examples`，接首批 Issue
-- [ ] v0.3.0: 两阶段生成、R5-2 粒度检测 override、自动评分
 - [ ] v0.5.0: 支持 JS/TS (tree-sitter)
 
 ## License

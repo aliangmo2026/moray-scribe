@@ -61,7 +61,7 @@ def test_doc_with_inference_merges_and_renders(
 
     assert result.summary["inference"]["merged"] == 1
     md = (tmp_path / "ARCHITECTURE.md").read_text(encoding="utf-8")
-    assert "## 十、AI 动态推断【AI 推断】" in md
+    assert "## 十一、AI 动态推断【AI 推断】" in md
     assert "sample_project.core.Engine.run" in md
     assert "self.engine.run" in md
     assert "[AI推断·未合图]" in md
@@ -154,6 +154,12 @@ def test_describer_fallback_ladder_degrades(
         return InferenceReport()
 
     monkeypatch.setattr("moray_scribe.pipeline.run_inference_sync", _fake_inference)
+    # The sequence stage shares the same fake client; stub it out so the
+    # call_log stays a pure describer-ladder measurement.
+    monkeypatch.setattr(
+        "moray_scribe.pipeline.describe_sequences",
+        lambda chains, client, cfg, **kwargs: None,
+    )
 
     result = run_with_result("doc", sample_project_path, cfg, out_dir=tmp_path)
 

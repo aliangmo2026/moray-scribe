@@ -1,0 +1,75 @@
+name: arch-check
+
+# 每次PR自动做"架构体检"：跑两遍 moray-scribe graph（基线=PR基点，当前=PR头），
+# diff 出新增死代码与核心枢纽剧变，把报告评论到 PR，并按 --fail-on 决定红绿灯。
+# 详见 docs/github_action.md。
+
+on:
+  pull_request:
+    paths:
+      - "**.py"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  architecture:
+    name: Architecture check (dead code + hub drift)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history, so the PR base commit is reachable)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install moray-scribe (the tool, from PyPI)
+        run: pip install "moray-scribe>=0.4"
+
+      - name: Baseline graph (PR base commit)
+        run: |
+          git checkout "$BASE_SHA"
+          moray-scribe graph . --out .moray/before --exclude "**/tests/**" --exclude "**/.venv/**"
+          git checkout -
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+      - name: Current graph (PR head)
+        run: moray-scribe graph . --out .moray/after --exclude "**/tests/**" --exclude "**/.venv/**"
+
+      - name: Architecture check (write report, remember exit code)
+        run: |
+          set +e
+          moray-scribe check . \
+            --baseline .moray/before/pruned-graph.json \
+            --current .moray/after/pruned-graph.json \
+            --report .moray/report.md \
+            --fail-on dead
+          echo $? > .moray/exit-code
+          cat .moray/report.md
+
+      - name: Comment findings on the PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body-file .moray/report.md
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch-check-report
+          path: .moray/report.md
+
+      - name: Apply verdict (red light on new dead code)
+        if: always()
+        run: exit "$(cat .moray/exit-code)"

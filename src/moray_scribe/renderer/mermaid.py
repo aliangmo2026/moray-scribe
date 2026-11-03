@@ -15,6 +15,8 @@ from moray_scribe.schema import (
     MermaidEdge,
     MermaidNode,
     NodeKind,
+    SequenceFlow,
+    SequenceMessageKind,
 )
 
 _ARROW_BY_STYLE = {
@@ -275,3 +277,62 @@ def diagram_to_mermaid(diagram: MermaidDiagram) -> str:
 def diagram_to_mermaid_fence(diagram: MermaidDiagram, *, lang: str = "mermaid") -> str:
     """Wrap :func:`diagram_to_mermaid` output in a fenced code block."""
     return f"```{lang}\n{diagram_to_mermaid(diagram)}\n```"
+
+
+# --------------------------------------------------------------------------
+# sequenceDiagram rendering
+# --------------------------------------------------------------------------
+
+_SEQUENCE_ARROW = {
+    SequenceMessageKind.SYNC: "->>",
+    SequenceMessageKind.ASYNC: "-)",
+    SequenceMessageKind.REPLY: "-->>",
+}
+
+
+def _escape_sequence_text(text: str) -> str:
+    """Escape free-form text for a sequence-diagram statement.
+
+    Newlines and carriage returns become spaces (a statement ends at the line
+    break), ``;`` becomes a comma (Mermaid treats it as a statement separator),
+    and other control characters are dropped. Everything else — including CJK
+    and ``&``/``"`` — passes through as-is: sequence message text is more
+    permissive than flowchart labels, and the ``#quot;``-style entities used by
+    :func:`_escape_label` render literally here.
+    """
+    out: list[str] = []
+    for char in text:
+        if char in ("\n", "\r"):
+            out.append(" ")
+        elif char == ";":
+            out.append(",")
+        elif ord(char) < 32:
+            continue
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def sequence_flow_to_mermaid(flow: SequenceFlow) -> str:
+    """Render one validated sequence flow as Mermaid ``sequenceDiagram`` text.
+
+    Output is deterministic: participants and messages render in declared
+    order (the order *is* the business flow), with ``autonumber`` so reviewers
+    can cite steps by number.
+    """
+    lines = ["sequenceDiagram", "    autonumber"]
+    for participant in flow.participants:
+        lines.append(
+            f"    participant {participant.key} as {_escape_sequence_text(participant.label)}"
+        )
+    for message in flow.messages:
+        arrow = _SEQUENCE_ARROW[message.kind]
+        lines.append(
+            f"    {message.sender}{arrow}{message.receiver}: {_escape_sequence_text(message.label)}"
+        )
+    return "\n".join(lines)
+
+
+def sequence_flow_to_mermaid_fence(flow: SequenceFlow, *, lang: str = "mermaid") -> str:
+    """Wrap :func:`sequence_flow_to_mermaid` output in a fenced code block."""
+    return f"```{lang}\n{sequence_flow_to_mermaid(flow)}\n```"

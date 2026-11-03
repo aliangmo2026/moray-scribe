@@ -30,7 +30,7 @@ def test_version_prints_package_version() -> None:
     result = _invoke("--version")
 
     assert result.exit_code == 0
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.5.0"
     assert result.output.strip() == __version__
 
 
@@ -86,3 +86,57 @@ def test_timeout_flag_overrides_settings(
 
     assert result.exit_code == 0
     assert seen["timeout"] == 900
+
+
+def test_graph_accepts_include_exclude(
+    sample_project_path: Path, tmp_path: Path
+) -> None:
+    """`graph --exclude` filters files (v0.5: parity with scan/doc; CI needs it)."""
+    import json
+
+    out_dir = tmp_path / "g"
+    result = _invoke(
+        "graph", str(sample_project_path),
+        "--out", str(out_dir),
+        "--exclude", "**/service.py",
+        "--exclude", "**/calls.py",
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads((out_dir / "pruned-graph.json").read_text(encoding="utf-8"))
+    modules = {node["module"].rsplit(".", 1)[-1] for node in payload["nodes"].values()}
+    assert "service" not in modules
+    assert "calls" not in modules
+    assert "core" in modules
+
+
+def test_check_accepts_include_exclude(tmp_path: Path) -> None:
+    """`check` builds its current graph honoring --exclude when --current is absent."""
+    from tests.test_cli_check import _node_payload, _write_graph
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "__init__.py").write_text("", encoding="utf-8")
+    (project / "app.py").write_text("def runner():\n    return helper()\n\n\n"
+                                    "def helper():\n    return 1\n", encoding="utf-8")
+    (project / "skipme.py").write_text("def lonely():\n    pass\n", encoding="utf-8")
+
+    baseline = _write_graph(
+        tmp_path / "baseline.json",
+        [_node_payload("proj.app.runner", 0.6), _node_payload("proj.app.helper", 0.3)],
+        [("proj.app.runner", "proj.app.helper")],
+    )
+    report = tmp_path / "report.md"
+
+    result = _invoke(
+        "check", str(project),
+        "--baseline", str(baseline),
+        "--report", str(report),
+        "--fail-on", "none",
+        "--exclude", "**/skipme.py",
+    )
+
+    assert result.exit_code == 0, result.output
+    body = report.read_text(encoding="utf-8")
+    # skipme.py's lonely() never entered the graph -> not flagged as new dead.
+    assert "lonely" not in body

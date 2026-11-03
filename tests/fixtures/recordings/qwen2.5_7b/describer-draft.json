@@ -1,0 +1,18 @@
+{
+  "captured_at": "2026-11-03T16:33:07.544195+00:00",
+  "model": "qwen2.5:7b",
+  "endpoint": "/api/chat",
+  "prompt": {
+    "system": "You output ONLY a JSON architecture draft describing a tiny module graph.",
+    "user": "Produce a draft for a module \"core\" with function \"Engine.run\". JSON shape: {\"title\": str, \"summary\": str(>=50 chars), \"diagrams\": [], \"modules\": [{\"module\": \"core\", \"summary\": \"...\", \"responsibilities\": [], \"symbol_ids\": [], \"risk\": \"low\"}], \"core_hubs\": [], \"dead_code\": [], \"risks\": [], \"recommendations\": []}"
+  },
+  "response": {
+    "model": "qwen2.5:7b",
+    "message": {
+      "role": "assistant",
+      "content": "{\n    \"title\": \"Engine Run Module Draft\",\n    \"summary\": \"A core module responsible for running the engine with defined responsibilities.\",\n    \"diagrams\": [],\n    \"modules\": [\n        {\n            \"module\": \"core\",\n            \"summary\": \"Manages the execution of the engine.\",\n            \"responsibilities\": [\"Initialize engine\", \"Execute tasks\", \"Handle errors\"],\n            \"symbol_ids\": [],\n            \"risk\": \"low\"\n        }\n    ],\n    \"core_hubs\": [],\n    \"dead_code\": [],\n    \"risks\": [],\n    \"recommendations\": []\n}"
+    },
+    "prompt_eval_count": 118,
+    "eval_count": 122
+  }
+}

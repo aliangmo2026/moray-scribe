@@ -51,6 +51,8 @@ dev = [
     "pytest-cov",
     "ruff>=0.5",
     "mypy>=1.10",
+    # Parses .github/workflows/arch-check.yml in the contract tests.
+    "pyyaml>=6",
 ]
 benchmark = [
     "psutil>=5.9",

@@ -210,6 +210,11 @@ function applyDeepLink() {
     const input = document.getElementById("search");
     if (input) input.value = query;
   }
+  // ?chat=1 opens the Graph RAG drawer so a shared link lands ready to ask.
+  if (PARAMS.get("chat") === "1") {
+    const panel = document.getElementById("chat-panel");
+    if (panel) panel.hidden = false;
+  }
 }
 
 /** Select the `?select=` target after the camera has been fitted. */
@@ -815,16 +820,6 @@ function renderEdgeLists(node) {
   document.getElementById("detail-edges").innerHTML = rows.length
     ? rows.join("")
     : '<li class="empty-row">没有已解析的调用/依赖关系（悬空调用会进入 AI 推断池）</li>';
-
-  for (const item of document.querySelectorAll("#detail-edges li[data-node], #detail-inference li[data-node]")) {
-    item.addEventListener("click", () => {
-      const target = state.byId.get(item.dataset.node);
-      if (target) {
-        selectNode(target);
-        focusNode(target);
-      }
-    });
-  }
 }
 
 async function renderSource(node) {
@@ -1041,8 +1036,11 @@ window.addEventListener("keydown", (event) => {
     fitToView(true);
   } else if (event.key === "r" || event.key === "R") {
     document.getElementById("btn-relayout").click();
+  } else if (event.key === "c" || event.key === "C") {
+    toggleChat();
   } else if (event.key === "Escape") {
-    document.getElementById("btn-close").click();
+    if (!chatPanel.hidden) toggleChat(false);
+    else document.getElementById("btn-close").click();
   }
 });
 
@@ -1064,4 +1062,103 @@ function exportPng() {
 }
 
 window.addEventListener("resize", resize);
+
+// ------------------------------------------------------------ Graph RAG chat
+
+const chatPanel = document.getElementById("chat-panel");
+const chatMessages = document.getElementById("chat-messages");
+const chatInput = document.getElementById("chat-input");
+const chatSend = document.getElementById("chat-send");
+let chatBusy = false;
+
+function toggleChat(force) {
+  const show = typeof force === "boolean" ? force : chatPanel.hidden;
+  chatPanel.hidden = !show;
+  if (show) chatInput.focus();
+}
+
+function appendChatMessage(role, html) {
+  const bubble = document.createElement("div");
+  bubble.className = `chat-msg ${role}`;
+  bubble.innerHTML = html;
+  chatMessages.appendChild(bubble);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  return bubble;
+}
+
+function nodeChip(id) {
+  const short = id.includes(".") ? id.slice(id.lastIndexOf(".") + 1) : id;
+  return `<button class="node-chip" data-node="${escapeHtml(id)}" title="${escapeHtml(id)}">${escapeHtml(short)}</button>`;
+}
+
+function renderChatAnswer(payload) {
+  const cited = Array.isArray(payload.nodes) ? payload.nodes : [];
+  let chips = cited.map(nodeChip).join("");
+  let chipsTitle = "";
+  if (!cited.length) {
+    const fallback = (payload.context_nodes || []).slice(0, 4);
+    chips = fallback.map(nodeChip).join("");
+    chipsTitle = '<div class="chat-chips-label">相关节点（未引用具体节点）</div>';
+  } else {
+    chipsTitle = '<div class="chat-chips-label">点击高亮</div>';
+  }
+  const degraded = payload.degraded
+    ? '<div class="chat-degraded">⚠ 模型未按 JSON 返回，以下为原始回答</div>'
+    : "";
+  return (
+    degraded +
+    escapeHtml(payload.answer || "").replace(/\n/g, "<br>") +
+    (chips ? `<div class="chat-chips">${chipsTitle}<div class="chat-chips-row">${chips}</div></div>` : "") +
+    `<div class="chat-ctx">检索子图：${payload.context ? payload.context.nodes : 0} 节点 / ${payload.context ? payload.context.edges : 0} 边 / ${payload.context ? payload.context.slices : 0} 源码切片</div>`
+  );
+}
+
+async function sendChat(question) {
+  if (chatBusy || !question) return;
+  chatBusy = true;
+  chatSend.disabled = true;
+  appendChatMessage("user", escapeHtml(question));
+  const pending = appendChatMessage("bot", '<span class="chat-thinking">检索子图并推理中…</span>');
+  try {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      pending.innerHTML = `<span class="chat-error">❌ ${escapeHtml(payload.error || `HTTP ${response.status}`)}</span>`;
+    } else {
+      pending.innerHTML = renderChatAnswer(payload);
+    }
+  } catch (error) {
+    pending.innerHTML = `<span class="chat-error">❌ ${escapeHtml(error.message || String(error))}</span>`;
+  } finally {
+    chatBusy = false;
+    chatSend.disabled = false;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+}
+
+// Click a node chip (or an edge-list item) → select + highlight on canvas.
+document.addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-node]");
+  if (!chip) return;
+  const target = state.byId.get(chip.dataset.node);
+  if (target) {
+    selectNode(target);
+    focusNode(target);
+  }
+});
+
+document.getElementById("chat-toggle").addEventListener("click", () => toggleChat());
+document.getElementById("chat-close").addEventListener("click", () => toggleChat(false));
+
+document.getElementById("chat-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const question = chatInput.value.trim();
+  chatInput.value = "";
+  sendChat(question);
+});
+
 boot();

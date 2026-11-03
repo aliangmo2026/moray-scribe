@@ -1,0 +1,18 @@
+{
+  "captured_at": "2026-11-03T16:33:22.589929+00:00",
+  "model": "qwen2.5:7b",
+  "endpoint": "/api/chat",
+  "prompt": {
+    "system": "You narrate traced call chains as business sequence flows. Output ONLY JSON.",
+    "user": "One chain: entry=`app.main` -> `core.Engine` [instantiates]. Return {\"flows\": [{\"title\": \"...\", \"summary\": \"...\", \"participants\": [{\"key\": \"App\", \"label\": \"app 模块\"}, {\"key\": \"Core\", \"label\": \"core 模块\"}], \"messages\": [{\"sender\": \"App\", \"receiver\": \"Core\", \"label\": \"Engine()\", \"kind\": \"sync\"}]}]}"
+  },
+  "response": {
+    "model": "qwen2.5:7b",
+    "message": {
+      "role": "assistant",
+      "content": "{\n  \"flows\": [\n    {\n      \"title\": \"应用主入口调用核心引擎\",\n      \"summary\": \"app 模块通过调用 core 模块中的 Engine 类来初始化核心引擎。\",\n      \"participants\": [\n        {\n          \"key\": \"App\",\n          \"label\": \"app 模块\"\n        },\n        {\n          \"key\": \"Core\",\n          \"label\": \"core 模块\"\n        }\n      ],\n      \"messages\": [\n        {\n          \"sender\": \"App\",\n          \"receiver\": \"Core\",\n          \"label\": \"Engine()\",\n          \"kind\": \"sync\"\n        }\n      ]\n    }\n  ]\n}"
+    },
+    "prompt_eval_count": 122,
+    "eval_count": 140
+  }
+}

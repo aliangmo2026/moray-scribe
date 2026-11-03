@@ -1,5 +1,105 @@
 # Changelog
 
+## [0.5.0] - 2026-11-04
+
+「极限工程化与开箱即用」：Docker 化、一键安装、10 项目基准榜单、离线 Mock 生态、
+多语言可行性验证与宣发物料。
+
+### 新特性
+
+- **Docker 化**：`Dockerfile`（python:3.12-slim，314MB，非 root 用户，pip 走
+  Tsinghua 镜像可切换）+ `docker-compose.yml`（`docker compose up` →
+  `http://localhost:8000`，项目挂 `/work`，产物落 `/data` 卷，
+  chat 经 `host.docker.internal` 连**宿主机 Ollama**——模型不出本机）。
+  entrypoint 支持 `viewer`（默认：分析+起 UI）/`graph`/`doc`/`shell` 四模式；
+  自动把 `/work` 深拷贝到 `/tmp/scan/project` 规避包式项目的父目录扫描问题。
+- **一键安装**：`install.sh`（Linux/macOS）与 `install.ps1`（Windows，UTF-8 BOM
+  兼容 PowerShell 5.1）：找 Python≥3.10（失败路径给明确指引）→ 独立 venv →
+  优先本地 `dist/` wheel 否则 PyPI（`MORAY_PIP_INDEX`/`-PipIndex` 可指镜像）→
+  Ollama 在线检查（可跳过）。
+- **Benchmark 榜单**：`benchmarks/clone_corpus.sh`（gitee 镜像 shallow clone 10 个
+  顶级项目）、`benchmarks/run_leaderboard.py`（graph+doc 全链路计时/节点/枢纽/
+  死代码/时序图，JSONL 落盘）、`benchmarks/render_leaderboard.py`（机器渲染
+  `docs/benchmark-leaderboard.md`，零人工数字）。10/10 全成功、16 条业务时序图
+  零降级；期间三波真机排障产出两个核心修复（见下）。
+- **多语言可行性**：`benchmarks/test_tree_sitter.py`——tree-sitter 解析
+  TypeScript 与 Go 真实样例并映射到现有 SymbolGraph 契约（0 悬挂边）；
+  评估文档 `docs/multi-lang-future.md`（Go ≈ 2-3 周 POC、TS ≈ 4-6 周，
+  describer/渲染/Viewer/RAG 全链路零改动）。
+- **离线 Mock 生态**：`benchmarks/capture_recordings.py` 把**真实模型输出**
+  （describer 草稿/时序计划/Graph-RAG 回答，qwen2.5:7b）录制成
+  `tests/fixtures/recordings/`；`tests/mock_ollama.py` 提供 Ollama 线协议
+  回放服务器（`mock_ollama` fixture，FIFO/enqueue/tags）+ **离线网络守卫**
+  （autouse：任何测试连 11434 端口直接报错）——整个测试套件可在没有 Ollama
+  的机器上跑，且永远不会再悄悄依赖本地服务。
+- **宣发物料**：`docs/promotion/` 三篇不同风格文章（硬核技术风/极客风/小白风）。
+
+### 修复（容器实测逼出的核心代码强化）
+
+- **`ArchitectureDraft.metadata` 放宽为 `dict[str, str | int | float]`**：小模型
+  惯于写 `"total_symbols": 353`（整数），strict `dict[str,str]` 会整份 draft
+  拒收——10 项目实测中这是 doc 失败的根因之一。
+- **大 draft 截断**：`num_predict=4096` 会把 60 节点视图的 pretty-print draft
+  拦腰截断（榜单排障实测）；基准 harness 默认 8192，文档建议大仓库同步调大
+  `MORAY_SCRIBE_MAX_OUTPUT_TOKENS`。
+- `moray-scribe graph`/`check` 新增 `--include`/`--exclude`（与 scan/doc 对齐；
+  v0.4 的 arch-check.yml 在真实 GitHub Actions 上会因 graph 无 `--exclude`
+  直接失败——CI 实测前不会发现）。
+- **graph 摘要的枢纽/死代码计数改为全图口径**：原先在剪枝后子图上计算，
+  dead_code_count 是 `--max-nodes` 的函数（tqdm 实测 140 节点=19、60 节点=0），
+  现在反映代码库真实属性（tqdm=123），并有预算无关性回归测试。
+- `resolve_scan_root` 拒绝把包式项目的扫描根上移到**文件系统根**（此前会把
+  整个卷交给扫描器，容器里表现为神秘挂起）。
+- `install.ps1` 加 `-Python` 显式解释器参数。
+
+### 兼容性
+
+- 版本 0.4.0 → 0.5.0；`dev` extras 不变；容器端口 `MORAY_PORT` 可覆盖
+  （默认仍为 8000）。
+
+## [0.4.0] - 2026-11-03
+
+「从拓扑图到业务时序图，从看到问，从工具到 CI 门禁」：业务时序图、Graph RAG
+问答与 GitHub Action 架构体检。
+
+### 新特性
+
+- **业务时序图（§九、核心业务时序图）**：`grapher/tracer.py` 从入口点
+  （路由 / `main` / CLI / `__init__`）沿 `calls`/`instantiates` 边做
+  确定性 DFS（按目标 PageRank 优先、环剪枝、深度/数量双重预算），
+  `describer/sequencer.py` 把调用链喂给 Ollama 生成结构化时序流
+  （participants + 有序 messages，Pydantic 严格校验 + 语义校验器拒绝
+  数量不符），渲染层输出标准 Mermaid `sequenceDiagram`（`autonumber`，
+  sync/reply/async 三种箭头，转义确定性）。自愈阶梯：全部链 → 一半 →
+  三分之一，携带 prior-errors；全部失败时**确定性降级**为引擎直绘时序
+  （`source="engine"`，章节挂【引擎统计】标签），文档永远不缺时序图。
+  `doc` 模式额外导出 `sequence-NN.mmd`；「已知缺口」「AI 动态推断」顺延为
+  第十/十一节。
+- **Graph RAG 问答（Web UI 对话框）**：`web_viewer/retrieval.py` ——
+  中英混合分词（CJK bigram）、词法打分（id/名 3 分、模块/路由 2 分、
+  文档 1 分）选种子，**反向 BFS**（谁调用它 → 影响面）+ 单跳正向扩展，
+  PageRank 决定进入预算的优先级，预算未满按邻居补足；源码切片带目录
+  穿越防护。`web_viewer/chat.py` —— 纯标准库 Ollama 客户端（协议白名单
+  http/https、**禁重定向**、固定路径），JSON 回答 + 引用节点过滤（≤8，
+  只允许检索子图内的 id），非 JSON 回答降级透传。`POST /api/chat` 返回
+  回答、可点击节点、检索统计与 `context_nodes`。前端新增 💬 问答面板
+  （快捷键 `C`），回答中的节点芯片**点击直接画布高亮**。
+- **GitHub Action 架构体检**：新 CLI 子命令 `moray-scribe check`——
+  `grapher/diff.py` 对比基线与当前图谱（死代码现场重算，旧基线可比；
+  枢纽 = top-N PageRank 并集上的出局/腰斩/新进榜三判定），
+  `--fail-on dead|hub|any|none` 决定 CI 红绿灯，`--report` 生成 PR 评论
+  Markdown。`.github/workflows/arch-check.yml`：PR 时在 merge-base 现算
+  基线 + PR head 现算当前 → diff → 自动评论 → 按退出码挡合并；权限最小化
+  （`contents: read` + `pull-requests: write`，无 Secret）。完整说明见
+  `docs/github_action.md`。
+
+### 兼容性
+
+- `ARCHITECTURE.md` 章节重编号：九（时序图）、十（已知缺口）、十一（AI 动态推断）。
+- `doc` 摘要新增 `sequences_count` / `sequences_degraded`，`mmd_paths` 包含
+  `sequence-NN.mmd`。
+- `dev` extras 新增 `pyyaml`（workflow 契约测试用）。
+
 ## [0.3.0] - 2026-11-03
 
 「看得见、懂框架、跑得快」：交互式拓扑、领域特化、极限压测与性能自愈。

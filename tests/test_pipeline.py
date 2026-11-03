@@ -71,6 +71,30 @@ def test_pipeline_graph_writes_pruned(sample_project_path: Path, tmp_path: Path)
     assert "nodes" in graph and "edges" in graph
 
 
+def test_pipeline_graph_metrics_are_budget_independent(
+    sample_project_path: Path, tmp_path: Path
+) -> None:
+    """Hubs and dead-code counts come from the FULL graph, not the pruned view.
+
+    Prune drops dead candidates by design; if the summary counted them on the
+    pruned subset, the number would be a function of --max-nodes instead of a
+    property of the codebase (observed live: 19 dead at 140 nodes, 0 at 60).
+    """
+    from moray_scribe.pipeline import run_with_result
+
+    def _graph_run(max_nodes: int, out: Path) -> Any:
+        cfg = Settings(_env_file=None).model_copy(update={"max_nodes": max_nodes})
+        return run_with_result("graph", sample_project_path, cfg, out_dir=out).summary
+
+    small = _graph_run(10, tmp_path / "small")
+    large = _graph_run(200, tmp_path / "large")
+
+    assert small["dead_code_count"] == large["dead_code_count"] > 0
+    assert small["hubs_count"] == large["hubs_count"] > 0
+    # The node count itself is, of course, budget-bound.
+    assert small["nodes"] < large["nodes"]
+
+
 def test_pipeline_diagram_uses_fake_client(
     monkeypatch: pytest.MonkeyPatch,
     sample_project_path: Path,
@@ -106,7 +130,7 @@ def test_pipeline_doc_writes_architecture_md(
     content = target.read_text(encoding="utf-8")
     assert "## 一、概览【AI 推理】" in content
     assert "## 四、核心枢纽【引擎统计】" in content
-    assert "## 九、已知缺口" in content
+    assert "## 十、已知缺口" in content
 
 
 def test_pipeline_doc_writes_mmd_per_diagram(
@@ -152,6 +176,15 @@ def test_pipeline_doc_deterministic(
     draft = _pipeline_draft_json()
     client = fake_ollama_client([draft, draft])
     monkeypatch.setattr("moray_scribe.pipeline.OllamaClient", lambda **kwargs: client)
+    # Two doc runs share one fake response queue; stub the sequence stage so it
+    # cannot eat the second run's describer response.
+    from moray_scribe.describer.sequencer import SequenceOutcome, engine_sequence_flow
+
+    def _stub_sequences(chains, client_, cfg, **kwargs):
+        graph = kwargs["graph"]
+        return SequenceOutcome(flows=[engine_sequence_flow(c, graph) for c in chains])
+
+    monkeypatch.setattr("moray_scribe.pipeline.describe_sequences", _stub_sequences)
     cfg = Settings(_env_file=None)
     out_a = tmp_path / "a"
     out_b = tmp_path / "b"

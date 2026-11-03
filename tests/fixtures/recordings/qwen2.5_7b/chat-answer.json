@@ -1,0 +1,18 @@
+{
+  "captured_at": "2026-11-03T16:33:35.025108+00:00",
+  "model": "qwen2.5:7b",
+  "endpoint": "/api/chat",
+  "prompt": {
+    "system": "You answer questions about a codebase using ONLY the provided graph context. Output ONLY JSON {\"answer\": \"...\", \"nodes\": []}.",
+    "user": "Graph nodes: app.login -> app.check_password. Question: 修改 login 会影响什么？"
+  },
+  "response": {
+    "model": "qwen2.5:7b",
+    "message": {
+      "role": "assistant",
+      "content": "{\"answer\": \"修改 login 可能会影响 check_password 的功能。\", \"nodes\": []}"
+    },
+    "prompt_eval_count": 58,
+    "eval_count": 22
+  }
+}

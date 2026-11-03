@@ -106,6 +106,26 @@
     </aside>
   </main>
 
+  <button id="chat-toggle" class="chat-fab" title="图谱问答 (C)">💬<span class="chat-fab-label">问答</span></button>
+
+  <section id="chat-panel" class="chat-panel" hidden aria-label="图谱问答">
+    <header class="chat-head">
+      <div class="chat-title">🧠 图谱问答 <span class="muted" id="chat-model"></span></div>
+      <button class="icon-btn" id="chat-close" title="收起 (Esc)">×</button>
+    </header>
+    <div class="chat-messages" id="chat-messages">
+      <div class="chat-msg bot">
+        用自然语言向我提问，例如：<em>「修改 login 逻辑会影响哪些模块？」</em><br />
+        回答基于静态图谱检索（Graph RAG）：先反向 BFS 找调用方、按 PageRank
+        取相关子图与源码切片，再交给本地模型作答。点击回答中的节点芯片可直接在画布上高亮。
+      </div>
+    </div>
+    <form class="chat-input-row" id="chat-form">
+      <input id="chat-input" type="text" placeholder="向图谱提问… (Enter 发送)" autocomplete="off" spellcheck="false" />
+      <button type="submit" class="btn chat-send" id="chat-send">发送</button>
+    </form>
+  </section>
+
   <script src="/app.js"></script>
 </body>
 </html>

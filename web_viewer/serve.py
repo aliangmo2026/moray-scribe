@@ -4,11 +4,12 @@ Usage::
 
     python web_viewer/serve.py out/pruned-graph.json --port 8765
 
-The server exposes the viewer assets plus three JSON endpoints:
+The server exposes the viewer assets plus these JSON endpoints:
 
 - ``GET /api/config``           project metadata (name, graph path, source root)
 - ``GET /api/graph``            the graph JSON exactly as moray-scribe wrote it
 - ``GET /api/source?file=&start=&end=``  a source slice for the side panel
+- ``POST /api/chat``            graph-RAG Q&A over the symbol graph (v0.4)
 
 Only Python's standard library is used, so the viewer runs anywhere the CLI
 runs (no npm, no CDN, no network).
@@ -27,6 +28,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+try:  # package import (tests: `import web_viewer.serve`)
+    from .chat import ChatError, OllamaChatBackend
+    from .retrieval import RetrievalIndex, select_subgraph
+except ImportError:  # direct script run: `python web_viewer/serve.py`
+    from chat import ChatError, OllamaChatBackend  # type: ignore[no-redef]
+    from retrieval import RetrievalIndex, select_subgraph  # type: ignore[no-redef]
+
 ASSET_DIR = Path(__file__).resolve().parent
 _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -37,6 +45,9 @@ _ASSETS = {
 
 # Guard rails for the source endpoint: a view is a few dozen lines at most.
 _MAX_SOURCE_LINES = 400
+# Guard rails for the chat endpoint.
+_MAX_CHAT_BODY_BYTES = 64 * 1024
+_MAX_QUESTION_CHARS = 2000
 
 
 class ViewerState:
@@ -61,6 +72,13 @@ class ViewerState:
         self.source_root = resolved_root.resolve()
         self.project = project or metadata.get("project") or self.source_root.name
         self.nodes = _count_nodes(self.graph_text)
+        # Retrieval index for /api/chat; an unreadable graph just means an
+        # empty index (the viewer still works, chat answers degrade).
+        try:
+            self.index = RetrievalIndex(json.loads(self.graph_text), source_root=self.source_root)
+        except json.JSONDecodeError:
+            self.index = RetrievalIndex({}, source_root=self.source_root)
+        self.chat_backend: object | None = None
 
     def source_slice(self, relative: str, start: int, end: int) -> list[str]:
         """Return source lines ``[start, end]`` (1-based, inclusive).
@@ -123,6 +141,7 @@ def _handler_factory(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                         "graph": state.graph_path.name,
                         "source_root": str(state.source_root),
                         "nodes": state.nodes,
+                        "chat": state.chat_backend is not None,
                     }
                 )
                 return
@@ -156,6 +175,65 @@ def _handler_factory(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                 return
 
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path != "/api/chat":
+                self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if state.chat_backend is None:
+                self._json(
+                    {"error": "chat is disabled (start serve.py without --no-chat)"},
+                    HTTPStatus.NOT_IMPLEMENTED,
+                )
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            if length <= 0 or length > _MAX_CHAT_BODY_BYTES:
+                self._json({"error": "invalid request body"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._json({"error": "request body must be JSON"}, HTTPStatus.BAD_REQUEST)
+                return
+            question = ""
+            if isinstance(body, dict):
+                raw = body.get("question")
+                if isinstance(raw, str):
+                    question = raw.strip()
+            if not question or len(question) > _MAX_QUESTION_CHARS:
+                self._json(
+                    {"error": f"question must be 1-{_MAX_QUESTION_CHARS} characters"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                subgraph = select_subgraph(state.index, question)
+                context = subgraph.to_context()
+                answer = state.chat_backend.answer(question, context)  # type: ignore[attr-defined]
+            except ChatError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_GATEWAY)
+                return
+            except Exception as exc:
+                self._json({"error": f"chat failed: {exc!r}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._json(
+                {
+                    "answer": str(answer.get("answer", "")),
+                    "nodes": list(answer.get("nodes") or []),
+                    "degraded": bool(answer.get("degraded")),
+                    "context": {
+                        "nodes": len(subgraph.node_ids),
+                        "edges": len(subgraph.edges),
+                        "slices": len(subgraph.slices),
+                    },
+                    "context_nodes": subgraph.node_ids[:24],
+                    "project": state.project,
+                }
+            )
 
     return Handler
 
@@ -194,6 +272,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--project", default=None, help="Display name (default: graph folder).")
     parser.add_argument("--no-browser", action="store_true", help="Do not open a browser.")
+    parser.add_argument(
+        "--ollama-host",
+        default="http://127.0.0.1:11434",
+        help="Ollama host for /api/chat (default http://127.0.0.1:11434).",
+    )
+    parser.add_argument(
+        "--chat-model",
+        default="qwen2.5:7b",
+        help="Ollama model for /api/chat (default qwen2.5:7b).",
+    )
+    parser.add_argument(
+        "--no-chat",
+        action="store_true",
+        help="Disable the /api/chat Q&A endpoint.",
+    )
     args = parser.parse_args(argv)
 
     graph_path = args.graph.resolve()
@@ -203,11 +296,17 @@ def main(argv: list[str] | None = None) -> int:
     project = args.project
 
     state = ViewerState(graph_path, source_root if args.source_root else None, project)
+    if not args.no_chat:
+        state.chat_backend = OllamaChatBackend(
+            host=args.ollama_host,
+            model=args.chat_model,
+        )
     httpd = ThreadingHTTPServer((args.host, args.port), _handler_factory(state))
     url = f"http://{args.host}:{args.port}/"
     print(f"moray-scribe viewer: {url}")
     print(f"  graph:  {graph_path}")
     print(f"  source: {state.source_root}")
+    print(f"  chat:   {'off' if args.no_chat else state.chat_backend.model} ({args.ollama_host})")
     if not args.no_browser:
         # Headless / server environments may have no browser to open.
         with contextlib.suppress(Exception):

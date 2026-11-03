@@ -1,0 +1,23 @@
+# Keep the build context small (the .stress10 corpus alone is ~2 GB).
+.git
+.stress/
+.stress10/
+.bench-data/
+.venv/
+venv/
+out/
+dist/
+build/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.mimosa/
+docs/assets/
+examples/
+benchmarks/__pycache__/
+*.png
+*.gif
+*.md
+!README.md

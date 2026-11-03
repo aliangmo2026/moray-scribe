@@ -212,9 +212,14 @@ class ArchitectureDraft(StrictModel):
         default_factory=list,
         description="Actionable follow-up recommendations.",
     )
-    metadata: dict[str, str] = Field(
+    metadata: dict[str, str | int | float] = Field(
         default_factory=dict,
-        description="Generation metadata such as model name and timing.",
+        description=(
+            "Generation metadata such as model name and timing. Values tolerate "
+            "numbers: small models routinely write `\"total_symbols\": 353` "
+            "(int) here, and rejecting the whole draft over a scalar type cost "
+            "8/10 doc runs in the v0.5 leaderboard corpus."
+        ),
     )
 
     @model_validator(mode="after")

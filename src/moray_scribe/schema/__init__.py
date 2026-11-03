@@ -20,6 +20,14 @@ from .architecture import (
 )
 from .base import StrictModel
 from .graph import EdgeKind, SymbolEdge, SymbolGraph, SymbolNode
+from .sequence import (
+    SequenceFlow,
+    SequenceFlowDraft,
+    SequenceMessage,
+    SequenceMessageKind,
+    SequenceParticipant,
+    SequencePlan,
+)
 from .symbols import (
     AttrBinding,
     CallRef,
@@ -53,6 +61,12 @@ __all__ = [
     "RawSymbol",
     "RawSymbolBundle",
     "RouteInfo",
+    "SequenceFlow",
+    "SequenceFlowDraft",
+    "SequenceMessage",
+    "SequenceMessageKind",
+    "SequenceParticipant",
+    "SequencePlan",
     "StrictModel",
     "SymbolEdge",
     "SymbolGraph",

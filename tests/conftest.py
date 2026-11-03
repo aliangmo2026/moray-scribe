@@ -189,3 +189,30 @@ def sample_draft() -> ArchitectureDraft:
             "recommendations": ["Extract a repository interface."],
         }
     )
+
+
+# --------------------------------------------------------------------------
+# Offline mock-Ollama ecosystem (v0.5)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _offline_network_guard() -> None:
+    """Fail loudly if any test connects to a real Ollama port (11434).
+
+    The suite must pass on machines with no Ollama at all; the ``mock_ollama``
+    replay server stands in for the real service.
+    """
+    from tests.mock_ollama import install_offline_guard
+
+    install_offline_guard()
+
+
+@pytest.fixture()
+def mock_ollama():
+    """A localhost Ollama-wire server replaying real captured model responses."""
+    from tests.mock_ollama import MockOllama
+
+    mock = MockOllama.load()
+    yield mock
+    mock.stop()

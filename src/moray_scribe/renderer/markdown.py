@@ -15,11 +15,12 @@ from moray_scribe.schema import (
     MermaidEdge,
     MermaidNode,
     NodeKind,
+    SequenceFlow,
     SymbolGraph,
     SymbolKind,
 )
 
-from .mermaid import diagram_to_mermaid_fence
+from .mermaid import diagram_to_mermaid_fence, sequence_flow_to_mermaid_fence
 
 _HUB_LIMIT = 20
 _DEAD_LIMIT = 30
@@ -28,6 +29,7 @@ _INFERRED_LIMIT = 40
 _GAP_LIMIT = 40
 _ROUTE_LIMIT = 60
 _DATAFLOW_EDGE_LIMIT = 30
+_SEQUENCE_LIMIT = 8
 
 
 def _safe_mermaid_id(symbol_id: str, used: set[str]) -> str:
@@ -353,6 +355,57 @@ def _section_inference(inference: InferenceReport | None) -> list[str]:
     return lines
 
 
+def _section_sequences(
+    flows: list[SequenceFlow] | None,
+    degraded: bool,
+) -> list[str]:
+    """Render the business sequence-diagram section (§9, v0.4).
+
+    ``flows`` is ``None`` when the doc run never traced any chain (or the stage
+    was skipped); a non-empty list renders one numbered subsection per flow,
+    each with a standard Mermaid ``sequenceDiagram`` fence. The AI/engine tag
+    follows the document's split convention: model-authored flows are AI
+    reasoning, the deterministic fallback is engine statistics.
+    """
+    if degraded or not flows:
+        lines = [
+            "## 九、核心业务时序图【引擎统计】",
+            "",
+            "> LLM 阶段不可用或未通过校验时，本节执行**确定性降级**：",
+            "> 时序图由引擎从入口点确定性追踪生成，",
+            "> 每条消息对应一条静态确认的调用边。",
+            "",
+        ]
+    else:
+        lines = [
+            "## 九、核心业务时序图【AI 推理】",
+            "",
+            "> 调用链由引擎从入口点（路由 / main / CLI）确定性追踪；",
+            "> 时序图的业务命名与叙述由大模型生成，可能有误差，请对照源码复核。",
+            "",
+        ]
+    if not flows:
+        lines.append(
+            "未追踪到可绘制时序图的调用链（图过小、没有入口点，或本节未启用）。"
+        )
+        return lines
+    shown = flows[:_SEQUENCE_LIMIT]
+    for index, flow in enumerate(shown, start=1):
+        lines.append(f"### {index}. {flow.title}")
+        lines.append("")
+        if flow.summary:
+            lines.append(flow.summary)
+            lines.append("")
+        lines.append(f"**入口**：`{flow.entry}`")
+        lines.append("")
+        lines.append(sequence_flow_to_mermaid_fence(flow))
+        lines.append("")
+    if len(flows) > _SEQUENCE_LIMIT:
+        lines.append(f"_（仅展示前 {_SEQUENCE_LIMIT} 个，等 {len(flows)} 个流程）_")
+        lines.append("")
+    return lines
+
+
 def draft_to_markdown(
     draft: ArchitectureDraft,
     *,
@@ -364,6 +417,8 @@ def draft_to_markdown(
     core_hubs: list[tuple[str, float]],
     project_name: str,
     inference: InferenceReport | None = None,
+    sequence_flows: list[SequenceFlow] | None = None,
+    sequence_degraded: bool = False,
 ) -> str:
     """Generate the complete ARCHITECTURE.md content.
 
@@ -371,7 +426,9 @@ def draft_to_markdown(
     engine statistics (hubs, dead code, entry points, appendix stats) come from
     ``full_graph`` so the numbers reflect the whole project, not the pruned
     subset. ``inference`` adds the dynamic-inference section when the stage
-    ran. No timestamps are emitted.
+    ran. ``sequence_flows`` fills §9 with business sequence diagrams (AI
+    authored, or the deterministic fallback when ``sequence_degraded``). No
+    timestamps are emitted.
     """
     lines: list[str] = [f"# {project_name} · 架构文档", ""]
 
@@ -448,11 +505,12 @@ def draft_to_markdown(
     lines += _section_routes(full_graph)
     lines += ["", "---", "", "## 八、数据流向图【引擎统计】", ""]
     lines += _section_dataflow(full_graph)
+    lines += ["", "---", ""]
+    lines += _section_sequences(sequence_flows, sequence_degraded)
     lines += [
-        "",
         "---",
         "",
-        "## 九、已知缺口【引擎统计 + AI 提示】",
+        "## 十、已知缺口【引擎统计 + AI 提示】",
         "",
         "> 以下关系 scanner 无法百分百确认，AI 推理中也未覆盖。",
         "> 人工审查时请重点确认这些位置。",
@@ -464,7 +522,7 @@ def draft_to_markdown(
         lines.append("未发现已知缺口。")
     lines.append("")
 
-    lines += ["---", "", "## 十、AI 动态推断【AI 推断】", ""]
+    lines += ["---", "", "## 十一、AI 动态推断【AI 推断】", ""]
     lines += _section_inference(inference)
     lines.append("")
 

@@ -21,6 +21,7 @@ from moray_scribe.describer.inferencer import (
     merge_inferred_edges,
     run_inference_sync,
 )
+from moray_scribe.describer.sequencer import SequenceOutcome, describe_sequences
 from moray_scribe.exceptions import DescriberError, ScribeError
 from moray_scribe.grapher import (
     annotate_degrees,
@@ -29,10 +30,12 @@ from moray_scribe.grapher import (
     detect_dead_code,
     detect_entry_points,
     prune,
+    trace_call_chains,
 )
 from moray_scribe.renderer import (
     diagram_to_mermaid,
     draft_to_markdown,
+    sequence_flow_to_mermaid,
     validate_diagram,
 )
 from moray_scribe.scanner import extract_file, iter_python_files
@@ -64,9 +67,21 @@ def resolve_scan_root(path: Path) -> Path:
     When ``path`` is itself a package (contains ``__init__.py``), the scanner
     cannot derive a module name for the package root, so its parent is used
     instead. Any other path is returned unchanged.
+
+    The move-up is refused when the parent is a filesystem root (``/`` or a
+    drive letter): scanning would then walk the whole volume — observed as a
+    mysterious hang when a package-style project is mounted directly at
+    ``/work`` in a container. The caller gets an explicit error instead.
     """
     if (path / "__init__.py").is_file():
-        return path.parent
+        parent = path.parent
+        if parent == parent.parent:
+            raise ScribeError(
+                f"{path} is a package mounted at a filesystem root; scanning its "
+                "parent would walk the entire volume. Mount or copy it one level "
+                "deeper (e.g. /work/project)."
+            )
+        return parent
     return path
 
 
@@ -131,7 +146,16 @@ def _run_graph(root: Path, cfg: Settings, out_dir: Path) -> ScribeResult:
     file_count = len(bundles)
     symbol_count = sum(len(bundle.symbols) for bundle in bundles)
     module_count = len({bundle.module for bundle in bundles})
-    graph = _analyzed_graph(bundles, cfg)
+    # Hubs and dead-code candidates are FULL-GRAPH statistics: pruning drops
+    # dead candidates by design, so counting them on the pruned view would
+    # make the number a function of the budget (0 dead at small budgets)
+    # instead of a property of the codebase.
+    full_graph = build_symbol_graph(bundles)
+    annotate_degrees(full_graph)
+    compute_pagerank(full_graph)
+    hubs_count = _count_hubs(full_graph)
+    dead_code_count = len(detect_dead_code(full_graph))
+    graph = prune(full_graph, max_nodes=cfg.max_nodes, max_edges=cfg.max_edges)
     # The scanner bundles are the single largest allocation; free them before
     # serializing so peak RSS is graph-only.
     del bundles
@@ -145,8 +169,8 @@ def _run_graph(root: Path, cfg: Settings, out_dir: Path) -> ScribeResult:
         "modules_count": module_count,
         "nodes": graph.node_count,
         "edges": graph.edge_count,
-        "hubs_count": _count_hubs(graph),
-        "dead_code_count": sum(1 for node in graph.nodes.values() if node.is_dead_candidate),
+        "hubs_count": hubs_count,
+        "dead_code_count": dead_code_count,
         "out_path": str(target),
     }
     return ScribeResult(mode="graph", out_path=target, summary=summary)
@@ -205,6 +229,29 @@ def _maybe_infer(
         logger.warning("dynamic inference skipped: {}", exc)
     except Exception as exc:
         logger.warning("dynamic inference failed unexpectedly: {!r}", exc)
+    return None
+
+
+def _sequences_stage(
+    chains: list[Any],
+    client: OllamaClient,
+    cfg: Settings,
+    graph: SymbolGraph,
+    project_name: str,
+) -> SequenceOutcome | None:
+    """Narrate traced chains as sequence flows; never kill the doc run.
+
+    ``describe_sequences`` already degrades to deterministic engine flows, so
+    this wrapper only guards against the unexpected.
+    """
+    if not chains:
+        return None
+    try:
+        return describe_sequences(chains, client, cfg, graph=graph, project_name=project_name)
+    except ScribeError as exc:
+        logger.warning("sequence stage skipped: {}", exc)
+    except Exception as exc:
+        logger.warning("sequence stage failed unexpectedly: {!r}", exc)
     return None
 
 
@@ -329,6 +376,9 @@ def _run_doc(
     # unreachable candidate, and the report must not contradict the graph.
     dead_code = detect_dead_code(full_graph)
 
+    # Trace business call chains AFTER inference so merged edges participate.
+    chains = trace_call_chains(full_graph)
+
     pruned = prune(full_graph, max_nodes=cfg.max_nodes, max_edges=cfg.max_edges)
     pruned.metadata.update({"project": project_name, "root": str(root.resolve())})
     client = OllamaClient(
@@ -339,6 +389,8 @@ def _run_doc(
     if inference is not None:
         injected = apply_inferred_edges_to_draft(draft, full_graph)
         logger.info("drew {} inferred edge(s) into diagrams", injected)
+
+    sequence_outcome = _sequences_stage(chains, client, cfg, full_graph, project_name)
 
     core_hubs = sorted(
         ((node_id, full_graph.nodes[node_id].pagerank) for node_id in full_graph.nodes),
@@ -370,6 +422,8 @@ def _run_doc(
         core_hubs=core_hubs,
         project_name=project_name,
         inference=inference,
+        sequence_flows=sequence_outcome.flows if sequence_outcome else None,
+        sequence_degraded=sequence_outcome.degraded if sequence_outcome else False,
     )
     md_path = out_dir / "ARCHITECTURE.md"
     md_path.write_text(markdown, encoding="utf-8")
@@ -388,12 +442,20 @@ def _run_doc(
         for warning in validate_diagram(diagram):
             logger.warning("diagram-{}: {}", index, warning)
 
+    sequence_flows = sequence_outcome.flows if sequence_outcome else []
+    for index, flow in enumerate(sequence_flows):
+        seq_path = out_dir / f"sequence-{index:02d}.mmd"
+        seq_path.write_text(sequence_flow_to_mermaid(flow), encoding="utf-8")
+        mmd_paths.append(str(seq_path))
+
     logger.info("Architecture doc written to {}", md_path)
     summary: dict[str, Any] = {
         "modules_count": len(draft.modules),
         "hubs_count": len(core_hubs),
         "dead_code_count": len(dead_code),
         "diagrams_count": len(draft.diagrams),
+        "sequences_count": len(sequence_flows),
+        "sequences_degraded": bool(sequence_outcome and sequence_outcome.degraded),
         "md_path": str(md_path),
         "mmd_paths": mmd_paths,
         "describer": {
